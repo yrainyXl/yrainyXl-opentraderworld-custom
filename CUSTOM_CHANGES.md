@@ -94,20 +94,26 @@
 
 ## 3. Migration 编号登记
 
-**编号策略（长期约定）**：
+**编号策略（长期约定，2026-09-01 起）**：
 
-- `0001`–`0099`：upstream 编号段，**禁止占用**。
-- `0100`+：私有定制保留段，与 upstream 撞号风险最低。
+- `0001`–`999999999`：upstream 编号段，**禁止占用**（官方 master 已到 0097，会继续增长）。
+- `9000000000`+：私有定制保留 namespace，与 upstream 永不撞号。
 - 每次新建前：① 查 upstream 最新 migration 编号；② 查本表已占用编号；③ 再确认本地 `core/otw-store/migrations/` 实际文件。
 
 **已占用（custom）**：
 
 | 编号 | 文件 | 内容 | 状态 |
 |---|---|---|---|
-| 0100 | `0100_china_provider.sql` | Watchlist：`provider='china'` + 种子 China Market 连接器 | ✅ 已应用 |
-| 0101 | `0101_portfolio_china.sql` | Portfolio：`provider='china'` + `spot_provider='china'` | ✅ 已应用 |
+| 9000000100 | `9000000100_china_provider.sql` | Watchlist：`provider='china'` + 种子 China Market 连接器 | ✅ 已应用 |
+| 9000000101 | `9000000101_portfolio_china.sql` | Portfolio：`provider='china'` + `spot_provider='china'` | ✅ 已应用 |
 
-**基线**：接入定制时 upstream 最新 migration 为 `0091_findb_fav_key.sql`（2026-09-01 确认）。
+**一次性 namespace cutover（2026-09-01）**：custom migration 最初以 `0100`/`0101` 命名并已应用到数据库（`_sqlx_migrations` version 100/101，checksum `26c7a93a…`/`d6df54fb…`）。为规避与未来 upstream 编号（官方已到 0097，即将触及 0100）冲突，执行了 history cutover：
+
+1. 文件 rename：`0100_*` → `9000000100_*`、`0101_*` → `9000000101_*`（SQL 内容不变，SHA-384 不变）；
+2. 数据库：`UPDATE _sqlx_migrations SET version = 9000000100 WHERE version = 100`（101 同理），description / checksum / installed_on / success 全部保持原值；
+3. 新旧 binary 与 DB 版本必须同步切换（旧 binary + 新 DB、新 binary + 旧 DB 均不兼容，见「回滚红线」）。
+
+**基线**：接入定制时 upstream 最新 migration 为 `0091_findb_fav_key.sql`；官方 master（v0.0.9）已到 `0097_automator_draft.sql`（2026-09-01 确认）。
 
 **其他保障**：`core/otw-store/build.rs` 已保留 `println!("cargo:rerun-if-changed=migrations")`，migration 文件变化会自动触发 `sqlx::migrate!` 重编译；禁止通过修改 `lib.rs` 注释强制重建。
 
@@ -142,3 +148,16 @@
 - `CUSTOM_ARCHITECTURE.md`（仓库根目录）：**唯一权威**的长期架构 Source of Truth，完整内容只保存在本文件；架构性决策只修改本文件。
 - `docs/design/OOTW_LONG_TERM_ARCHITECTURE.md`：仅保留指向 `../../CUSTOM_ARCHITECTURE.md` 的简短 pointer（7 行），不保存完整副本；其他文件只能引用，不得复制完整架构内容。
 - `/opt/apps/cn-market/AGENTS.md`：sidecar 自己的开发纪律，并指向 `CUSTOM_ARCHITECTURE.md`。
+
+---
+
+## 7. Git 基线（2026-09-01 建立）
+
+- **仓库已恢复官方 Git 历史**：`git init` + fetch 官方 `G-OTW/OpenTraderWorld`（全部 tags v0.0.1–v0.0.9 + `upstream/master`）。
+- **Base commit**：`v0.0.8` = `9c4988137df5e191c163479f29daa5ca17c9d11c`（Release v0.0.8，2026-08-16）。
+- **Checkpoint commit**：`custom/main` = `c4602b449610c61d0f1e18ff1891d6ec77ba9354`（custom: server checkpoint 2026-09-01，父 = v0.0.8）。
+- **分支模型**：`custom/main`（定制主线）+ `upstream/master`（remote-tracking，官方 snapshot 来源）。未创建本地 `upstream/master` 分支。
+- **官方 Release 是非线性 root snapshot**（每个 tag 为独立无父提交），升级纪律见 `AGENTS.md`「Upstream Git discipline」与 `CUSTOM_ARCHITECTURE.md` §9.5：
+  - 禁止 `git merge upstream/master` / cherry-pick 官方 release root；
+  - 升级走本地 linearized `vendor/upstream`（synthetic commit：tree = 新官方 release，parent = 上一版 vendor snapshot），再 merge 进 `custom/main`。
+- **仓库外备份**：`/opt/apps/backups/otw-tree-pre-git-20260901-124803.tgz`（git 恢复前的工作树备份）。

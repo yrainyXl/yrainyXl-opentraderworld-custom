@@ -92,3 +92,19 @@ After a substantial task, report:
 
 If an architectural decision changes the long-term design,
 update CUSTOM_ARCHITECTURE.md instead of silently deviating from it.
+
+## Upstream Git discipline
+
+Official OpenTraderWorld release tags (v0.0.1 ... v0.0.9) are independent
+root snapshot commits, NOT linear Git history.
+
+- NEVER run `git merge upstream/master` or cherry-pick an official release
+  root directly onto custom/main.
+- Treat upstream tags / upstream/master ONLY as the source of official
+  snapshots.
+- Upgrading must go through a local linearized `vendor/upstream` branch:
+  - create ONE synthetic commit whose tree equals the new official release
+    and whose parent is the previous vendor snapshot;
+  - then merge `vendor/upstream` into `custom/main` so a normal 3-way merge
+    base exists.
+- Do not skip the vendor step by merging release roots directly.

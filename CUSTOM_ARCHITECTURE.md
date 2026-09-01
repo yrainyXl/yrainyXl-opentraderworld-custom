@@ -931,6 +931,18 @@ Upstream 潜在冲突点
 8. 前端共享格式函数是否变化
 ```
 
+## 9.5 官方 Release 是独立 root snapshot，升级必须走 linearized vendor/upstream
+
+官方 G-OTW/OpenTraderWorld 的 release tag（v0.0.1–v0.0.9）是彼此独立的 root snapshot commit，
+**不是线性 Git history**（每个 Release 都是无父提交）。
+
+- **禁止**直接执行 `git merge upstream/master` 或 cherry-pick 官方 release root。
+- upstream tag / `upstream/master` 只作为**官方 snapshot 来源**，不参与直接合并。
+- 后续官方升级使用本地 **linearized `vendor/upstream`** 分支：
+  1. 新增一个 synthetic commit：tree 等于新官方 release 的 tree，parent 等于上一版 vendor snapshot；
+  2. `custom/main` 再 merge `vendor/upstream`，从而保留正常三方 merge base。
+- 不要跳过 vendor 步骤直接合并 release root。
+
 ---
 
 # 10. AI 开发 Agent 的工作纪律
