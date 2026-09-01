@@ -224,7 +224,7 @@ SQLx 0.9 启动校验（`sqlx-core` migrator.rs `validate_applied_migrations`）
 ### 8.4 v0.0.9 升级执行记录（2026-09-01）
 
 - **vendor commit**：`85f25a7350ca48bb4dfcf286b281012ff29babd8`（synthetic v0.0.9，tree 与官方 `1ab52ad` 一致）。
-- **merge commit**：`5dbfc93f7f6c99d9c40a56dc48f3d0057f92dc2e`（custom/main merge vendor/upstream；冲突 2 个 i18n 文件已按 §8.3 解决）。
+- **merge commit**：`6b7b955b2ebb2c2639a18445a250475277635493`（custom/main merge vendor/upstream；冲突 2 个 i18n 文件已按 §8.3 解决）。
 - **数据库**：新 Core 启动时自动应用 `0092–0097`（installed_on `2026-09-01 14:12:46 UTC`，success=t）；`9000000100/101` checksum/installed_on 原值未变。
 - **镜像**：新 core `a5df3007…`（v0.0.9）；新 frontend `23fcd0d6…`；rollback tags `otw-core:rollback-pre-v0.0.9` / `otw-frontend:rollback-pre-v0.0.9`。
 - **备份**：`/opt/apps/backups/otw-db-pre-v0.0.9-20260901-220807.sql`（136M）。
