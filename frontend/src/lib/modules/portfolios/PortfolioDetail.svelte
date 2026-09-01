@@ -1,5 +1,7 @@
 <script>
   import Icon from '$lib/ui/Icon.svelte';
+  import { goto } from '$app/navigation';
+  import { investmentCasesApi } from '../investment-cases/api.js';
   import Dropdown from '$lib/ui/Dropdown.svelte';
   // One portfolio's full-page detail: a header with grouped actions (back, currency dropdown,
   // auto-update, add asset, refresh), an expanded totals bandeau, the value chart, then a single
@@ -262,6 +264,15 @@
     confirmMessage = message;
     onConfirmYes = onyes;
     confirmOpen = true;
+  }
+
+  async function openResearch(asset) {
+    try {
+      const c = await investmentCasesApi.ensure(asset.id);
+      goto(`/investment-cases/${c.id}`);
+    } catch (e) {
+      toast.warn(e.message);
+    }
   }
 
   function deleteAsset(assetId) {
@@ -652,6 +663,12 @@
                     onclick={() => openOp(a.id, 'buy')}
                     title={$t('portfolios.detail.newOperation')}
                     aria-label={$t('portfolios.detail.newOperation')}><Icon name="plus" size={14} /></button
+                  >
+                  <button
+                    class="link"
+                    onclick={() => openResearch(a)}
+                    title={$t('portfolios.detail.research')}
+                    aria-label={$t('portfolios.detail.research')}><Icon name="book-open" size={13} /></button
                   >
                   <button class="link del" onclick={() => deleteAsset(a.id)}><Icon name="x" size={13} /></button>
                 </td>
