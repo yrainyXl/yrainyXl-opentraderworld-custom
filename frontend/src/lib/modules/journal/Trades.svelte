@@ -20,6 +20,8 @@
     templates = [],
     feeSchedules = [],
     suggestions = { tickers: [], exchanges: [], signals: [] },
+    // Discipline tags, offered as chips in the trade form.
+    tags = [],
     // Optional 'YYYY-MM-DD' to pre-scope the list to a single day (calendar click-through).
     // Applied once on mount, overriding any persisted date filter.
     initialDay = '',
@@ -28,6 +30,10 @@
     onback = null,
     onchanged = () => {}
   } = $props();
+
+  // id → tag, so a trade row can show its tags without a second request.
+  const tagById = $derived(new Map(tags.map((x) => [x.id, x])));
+  const tagsOf = (trade) => (trade.tags ?? []).map((id) => tagById.get(id)).filter(Boolean);
 
   let trades = $state([]);
   let loading = $state(true);
@@ -186,8 +192,16 @@
   function assetLabel(id) {
     return ASSET_CLASSES.find((a) => a.id === id)?.label ?? id;
   }
+  // Trade times are stored to the minute (TIMESTAMPTZ, entered via datetime-local), so the
+  // list shows them: two scalps on the same day are otherwise indistinguishable here. A
+  // legacy row that carries an exact local midnight is a date-only entry, and stays one.
   function fmtDate(iso) {
-    return iso ? new Date(iso).toLocaleDateString() : '—';
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    const day = d.toLocaleDateString();
+    if (d.getHours() === 0 && d.getMinutes() === 0) return day;
+    return `${day} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   }
 
   // Decimal places in a number's string form (0 for integers).
@@ -196,6 +210,17 @@
     const s = String(n);
     const i = s.indexOf('.');
     return i < 0 ? 0 : s.length - i - 1;
+  }
+
+  // The QTY column shows a quantity. An advanced trade has no flat `quantity`, so it is the
+  // sum of the entry legs; a partially-open one reads "closed/total" since the two differ.
+  function fmtQty(tr) {
+    if (!tr.advanced) return tr.quantity ?? '—';
+    const total = (tr.entries ?? []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
+    if (!total) return '—';
+    const open = Number(tr.open_qty) || 0;
+    const trim = (n) => Number(n.toFixed(8)).toString();
+    return open > 0 ? `${trim(total - open)}/${trim(total)}` : trim(total);
   }
 
   // Average entry display: weighted average can be a long repeating decimal, so show it
@@ -309,12 +334,25 @@
         <tbody>
           {#each pageTrades as tr (tr.id)}
             <tr>
-              <td class="strong">{tr.ticker || '—'}</td>
+              <td class="strong">
+                {tr.ticker || '—'}
+                <!-- Tags stay a dot rail here: the list is scanned, not read. Hovering
+                     names them; the analytics screen is where they are priced. -->
+                {#if tagsOf(tr).length}
+                  <span class="tagdots" title={tagsOf(tr).map((x) => x.name).join(', ')}>
+                    {#each tagsOf(tr) as tag (tag.id)}
+                      <span class="tagdot {tag.kind}"></span>
+                    {/each}
+                  </span>
+                {/if}
+              </td>
               <td>{assetLabel(tr.asset_class)}</td>
               <td><span class="side {tr.side}">{tr.side}</span></td>
               <td class="mono">{fmtDate(tr.entry_at)}</td>
               <td class="mono">{fmtDate(tr.exit_at)}</td>
-              <td class="num">{tr.advanced ? (tr.avg_entry != null ? `@${fmtAvgEntry(tr)}` : '—') : (tr.quantity ?? '—')}</td>
+              <td class="num" title={tr.advanced && tr.avg_entry != null ? `@${fmtAvgEntry(tr)}` : ''}>
+                {fmtQty(tr)}
+              </td>
               <td class="num">
                 {#if tr.net_pnl == null}
                   <span class="muted">{$t('journal.trades.open')}</span>
@@ -369,6 +407,7 @@
     initial={editing}
     defaultCategoryId={categoryId}
     {suggestions}
+    {tags}
     onsubmit={save}
     oncancel={() => (showForm = false)}
   />
@@ -384,6 +423,26 @@
 />
 
 <style>
+  /* Tag rail on a trade row: kind is the only distinction, names live in the title. */
+  .tagdots {
+    display: inline-flex;
+    gap: 3px;
+    margin-left: var(--space-2);
+    vertical-align: middle;
+  }
+  .tagdot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .tagdot.mistake {
+    background: var(--red);
+  }
+  .tagdot.rule {
+    background: var(--green);
+  }
+
   .trades {
     display: flex;
     flex-direction: column;

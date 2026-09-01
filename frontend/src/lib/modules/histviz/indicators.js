@@ -13,6 +13,14 @@
  *
  * `renko` lives here too as a chart-transform (rebuilds a synthetic bar series). */
 import { evalDef } from '$lib/indicators/evaluate.js';
+// A few catalog entries borrow the engine port instead of a second implementation: these are
+// the ones a strategy can be written on, so the line drawn here is the line the backtest read.
+import {
+  tema as temaCalc,
+  vwap as vwapCalc,
+  adx as adxCalc,
+  supertrend as supertrendCalc
+} from '$lib/indicators/math.js';
 
 // ── Moving averages ──────────────────────────────────────────────────────────────
 
@@ -521,6 +529,34 @@ export const CATALOG = [
     ]
   },
   {
+    type: 'tema',
+    label: 'TEMA (Triple EMA)',
+    kind: 'overlay',
+    sourceable: true,
+    params: [P('period', 'Period', 20)],
+    compute: (b, p) => [
+      { name: `TEMA ${p.period}${srcLabel(p.source)}`, kind: 'line', data: temaCalc(priceSource(b, p.source), p.period), color: 'green' }
+    ]
+  },
+  {
+    type: 'vwap',
+    label: 'VWAP (rolling)',
+    kind: 'overlay',
+    params: [P('period', 'Period', 20)],
+    compute: (b, p) => [
+      { name: `VWAP ${p.period}`, kind: 'line', data: vwapCalc(b.h, b.l, b.c, b.v, p.period), color: 'amber' }
+    ]
+  },
+  {
+    type: 'supertrend',
+    label: 'SuperTrend',
+    kind: 'overlay',
+    params: [P('period', 'Period', 10), P('mult', 'ATR mult', 3, 0.1, 10, 0.1)],
+    compute: (b, p) => [
+      { name: `SuperTrend ${p.period},${p.mult}`, kind: 'line', data: supertrendCalc(b.h, b.l, b.c, p.period, p.mult), color: 'accent' }
+    ]
+  },
+  {
     type: 'vwma',
     label: 'VWMA — Volume-Weighted MA',
     kind: 'overlay',
@@ -628,6 +664,15 @@ export const CATALOG = [
     kind: 'oscillator',
     params: [P('period', 'Period', 14)],
     compute: (b, p) => [{ name: `ATR ${p.period}`, kind: 'line', data: atr(b.h, b.l, b.c, p.period), color: 'accent' }]
+  },
+  {
+    type: 'adx',
+    label: 'ADX (Trend strength)',
+    kind: 'oscillator',
+    params: [P('period', 'Period', 14)],
+    compute: (b, p) => [
+      { name: `ADX ${p.period}`, kind: 'line', data: adxCalc(b.h, b.l, b.c, p.period), color: 'accent' }
+    ]
   },
   {
     type: 'stddev',

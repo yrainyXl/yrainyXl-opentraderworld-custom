@@ -66,16 +66,23 @@
   });
 
   // Poll jobs while any are active (and the download tab is visible). Connectors ride
-  // along so the quota usage pies advance while the worker downloads.
+  // along so the quota usage pies advance while the worker downloads. A queue where the
+  // only live jobs are parked (waiting out a quota or a rate limit) moves on the scale of
+  // minutes, so it polls slowly — the countdown itself ticks client-side.
+  const WORKING = new Set(['queued', 'running', 'cancelling']);
   let timer;
   $effect(() => {
     clearInterval(timer);
-    const active = jobs.some((j) => j.status === 'queued' || j.status === 'running');
-    if (tab === 'download' && active) {
-      timer = setInterval(() => {
-        loadJobs().catch(() => {});
-        loadConnectors().catch(() => {});
-      }, 1500);
+    const working = jobs.some((j) => WORKING.has(j.status));
+    const parked = jobs.some((j) => j.status === 'waiting');
+    if (tab === 'download' && (working || parked)) {
+      timer = setInterval(
+        () => {
+          loadJobs().catch(() => {});
+          loadConnectors().catch(() => {});
+        },
+        working ? 1500 : 15000
+      );
     }
     return () => clearInterval(timer);
   });
@@ -109,7 +116,7 @@
       </section>
       <section class="card">
         <h2>{$t('histdata.page.jobs')}</h2>
-        <JobList {jobs} />
+        <JobList {jobs} onchanged={onQueued} />
       </section>
     {:else}
       <section class="card">

@@ -4,7 +4,13 @@
   import { fmtNum } from './api.js';
   import { t } from '$lib/i18n';
 
-  let { stats = {} } = $props();
+  // `dca`: a savings plan is not measured against buy and hold. `buy_hold_return_pct` then
+  // carries the lump-sum line (the same total money deployed at the start), so the tile has
+  // to name it for what it is. The prop doubles as the flag and the block: an accumulation
+  // only plan has no round trip, so the two trade tiles read what it holds at the last bar.
+  let { stats = {}, dca = false } = $props();
+  const plan = $derived(dca && typeof dca === 'object' ? dca : null);
+  const noTrades = $derived(!!plan && !(stats.trades ?? 0));
 
   const vsBH = $derived((stats.return_pct ?? 0) - (stats.buy_hold_return_pct ?? 0));
 
@@ -13,7 +19,7 @@
       label: $t('backtest.stats.return'),
       value: `${fmtNum(stats.return_pct)}%`,
       signed: stats.return_pct,
-      sub: $t('backtest.stats.returnSub', {
+      sub: $t(dca ? 'backtest.stats.returnSubLump' : 'backtest.stats.returnSub', {
         buyHold: `${fmtNum(stats.buy_hold_return_pct)}%`,
         vsBH: `${vsBH >= 0 ? '+' : ''}${fmtNum(vsBH)}%`
       })
@@ -27,21 +33,40 @@
         final: fmtNum(stats.final_equity)
       })
     },
-    {
-      label: $t('backtest.stats.winRate'),
-      value: `${fmtNum(stats.win_rate)}%`,
-      sub: $t('backtest.stats.winRateSub', {
-        wins: stats.wins ?? 0,
-        losses: stats.losses ?? 0,
-        trades: fmtNum(stats.trades, 0)
-      })
-    },
-    {
-      label: $t('backtest.stats.profitFactor'),
-      value: fmtNum(stats.profit_factor),
-      signed: stats.profit_factor != null ? stats.profit_factor - 1 : null,
-      sub: $t('backtest.stats.profitFactorSub', { expectancy: `${fmtNum(stats.expectancy_pct)}%` })
-    },
+    ...(noTrades
+      ? [
+          {
+            label: $t('backtest.dca.tile_unrealized'),
+            value: fmtNum(plan.unrealized_pnl),
+            signed: plan.unrealized_pnl,
+            sub: $t('backtest.stats.holdingSub', { value: fmtNum(plan.holdings_value) })
+          },
+          {
+            label: $t('backtest.dca.tile_fills'),
+            value: fmtNum(plan.buys + plan.sells, 0),
+            sub: $t('backtest.dca.fillCount', { b: plan.buys, s: plan.sells })
+          }
+        ]
+      : [
+          {
+            label: $t('backtest.stats.winRate'),
+            value: `${fmtNum(stats.win_rate)}%`,
+            sub: $t('backtest.stats.winRateSub', {
+              wins: stats.wins ?? 0,
+              losses: stats.losses ?? 0,
+              trades: fmtNum(stats.trades, 0)
+            })
+          },
+          {
+            label: $t('backtest.stats.profitFactor'),
+            // A finite stand-in for "no losing trade", so it can sort and serialize: printing it
+            // as a ratio put 1,000,000,000 on the screen, the normal case for a savings plan.
+            value:
+              stats.profit_factor >= 1e9 ? $t('backtest.perf.noLoss') : fmtNum(stats.profit_factor),
+            signed: stats.profit_factor != null ? stats.profit_factor - 1 : null,
+            sub: $t('backtest.stats.profitFactorSub', { expectancy: `${fmtNum(stats.expectancy_pct)}%` })
+          }
+        ]),
     {
       label: $t('backtest.stats.maxDrawdown'),
       value: `−${fmtNum(stats.max_drawdown_pct)}%`,

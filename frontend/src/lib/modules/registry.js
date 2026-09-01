@@ -221,6 +221,13 @@ export const modules = [
     icon: 'brain',
     base: '/agent',
     descKey: 'module.agent.desc'
+  },
+  {
+    id: 'automator',
+    name: 'Automator',
+    icon: 'zap',
+    base: '/automator',
+    descKey: 'module.automator.desc'
   }
 ];
 

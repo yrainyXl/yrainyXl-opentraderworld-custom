@@ -42,7 +42,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/backtest/runs/{id}/report.md", get(report_md))
         .route("/api/backtest/runs/{id}/report.pdf", get(report_pdf))
         .route("/api/backtest/runs/{id}/montecarlo", post(montecarlo))
-        // Expert-mode library: strategies + custom indicators (CRUD).
+        // Library: strategies + custom indicators (CRUD).
         .route("/api/backtest/strategies", get(list_strategies).post(create_strategy))
         .route(
             "/api/backtest/strategies/{id}",
@@ -117,9 +117,9 @@ impl RunBody {
 /// A resolved `from`/`to` pair; `None` at either end means "unbounded that way".
 type Window = (Option<OffsetDateTime>, Option<OffsetDateTime>);
 
-/// Parse and validate a window. Shared by /run and /align so the preview can never accept a
-/// window the run would reject.
-fn resolve_window(from: Option<&str>, to: Option<&str>) -> Result<Window, ApiError> {
+/// Parse and validate a window. Shared by /run, /align and the optimizer so a preview or a sweep
+/// can never accept a window the run would reject.
+pub(crate) fn resolve_window(from: Option<&str>, to: Option<&str>) -> Result<Window, ApiError> {
     let from = from.map(|s| parse_bound(s, false)).transpose()?;
     let to = to.map(|s| parse_bound(s, true)).transpose()?;
     if let (Some(f), Some(t)) = (from, to) {
@@ -134,7 +134,7 @@ fn resolve_window(from: Option<&str>, to: Option<&str>) -> Result<Window, ApiErr
 /// (`2024-06-30`). A plain date is UTC midnight, except as an END bound where it covers the
 /// whole day — otherwise `to: "2024-06-30"` would drop every intraday bar of the 30th, which
 /// is not what anyone means by "through June".
-fn parse_bound(s: &str, end_of_day: bool) -> Result<OffsetDateTime, ApiError> {
+pub(crate) fn parse_bound(s: &str, end_of_day: bool) -> Result<OffsetDateTime, ApiError> {
     let s = s.trim();
     if let Ok(dt) = OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339) {
         return Ok(dt);
@@ -174,34 +174,12 @@ fn auto_run_name(assets: &[AssetArrays]) -> String {
     format!("{tickers} {} — {stamp}", assets[0].timeframe)
 }
 
-/// One asset's OHLCV split into the parallel arrays the engine consumes.
-struct AssetArrays {
-    ticker: String,
-    timeframe: String,
-    ts: Vec<String>,
-    open: Vec<f64>,
-    high: Vec<f64>,
-    low: Vec<f64>,
-    close: Vec<f64>,
-    volume: Vec<f64>,
-}
-
-impl AssetArrays {
-    fn as_bars(&self) -> Bars<'_> {
-        Bars {
-            ticker: &self.ticker,
-            ts: &self.ts,
-            open: &self.open,
-            high: &self.high,
-            low: &self.low,
-            close: &self.close,
-            volume: &self.volume,
-        }
-    }
-}
+/// One asset's OHLCV split into the parallel arrays the engine consumes. The engine owns the
+/// shape (the optimizer holds the same buffers for the life of a sweep).
+use crate::backtest::OwnedBars as AssetArrays;
 
 /// Load each dataset, enforce identical timeframe + the bar budget, and split into arrays.
-async fn load_assets(
+pub(crate) async fn load_assets(
     state: &AppState,
     ids: &[Uuid],
     limit: i64,
@@ -333,7 +311,14 @@ async fn run(
 
     // Legal settings that measure something other than the stated idea travel with the
     // result: the caller (agent or user) has to see them next to the numbers, not instead.
-    let warnings = body.settings.warnings();
+    let mut warnings = body.settings.warnings();
+    // Weight-table mistakes only the loaded datasets can reveal: a ticker the basket does not
+    // contain (which used to fall back to equal weights in silence), or an asset the table
+    // forgot (a leg the plan then never buys).
+    if let Some(cfg) = body.settings.dca.as_ref().filter(|_| body.settings.kind == "dca") {
+        let tickers: Vec<&str> = assets.iter().map(|a| a.ticker.as_str()).collect();
+        warnings.extend(backtest::dca::weight_warnings(cfg, &tickers));
+    }
 
     // "summary" drops the two unbounded arrays (trades, equity) and the benchmark series.
     if body.view.as_deref() == Some("summary") {
@@ -351,9 +336,11 @@ async fn run(
             "skipped_min_size": result.skipped_min_size,
             "skipped_margin": result.skipped_margin,
             "halted_bars": result.halted_bars,
+            "filtered_bars": result.filtered_bars,
             "oos": result.oos,
             "total_funding": result.total_funding,
             "grid": result.grid,
+            "dca": dca_headline(result.dca.as_ref()),
             // Counts stand in for the omitted arrays so the caller knows what it can fetch.
             "trades_omitted": result.trades.len(),
             "equity_points_omitted": result.equity.len(),
@@ -379,11 +366,13 @@ async fn run(
         "skipped_min_size": result.skipped_min_size,
         "skipped_margin": result.skipped_margin,
         "halted_bars": result.halted_bars,
+        "filtered_bars": result.filtered_bars,
         "oos": result.oos,
         // Phase-4 additions (presentation).
         "benchmark": result.benchmark,
         "total_funding": result.total_funding,
         "grid": result.grid,
+        "dca": result.dca,
     })))
 }
 
@@ -444,56 +433,9 @@ pub fn sweep_trial_count(body: Option<&Value>) -> Option<usize> {
     Some(n.clamp(1, MAX_SWEEP_TRIALS))
 }
 
-/// Set a dot-path inside the settings JSON, creating intermediate objects.
-///
-/// A numeric segment indexes an array: `long.entry.conditions.0.left.period` is the ordinary
-/// shape of a signal rule, so a grid that cannot reach into arrays cannot sweep an indicator
-/// period — which is the parameter anyone actually wants to sweep. Indices must already
-/// exist; a grid does not invent conditions.
-fn set_path(root: &mut Value, path: &str, val: Value) -> Result<(), String> {
-    let parts: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        return Err("empty grid path".into());
-    }
-    let mut cur = root;
-    for seg in &parts[..parts.len() - 1] {
-        cur = step(cur, seg, path)?;
-    }
-    let last = parts[parts.len() - 1];
-    match cur {
-        Value::Object(o) => {
-            o.insert(last.to_string(), val);
-            Ok(())
-        }
-        Value::Array(a) => {
-            let i: usize = last
-                .parse()
-                .map_err(|_| format!("\"{path}\": \"{last}\" is not an array index"))?;
-            let slot = a
-                .get_mut(i)
-                .ok_or_else(|| format!("\"{path}\": index {i} is past the end of the array"))?;
-            *slot = val;
-            Ok(())
-        }
-        _ => Err(format!("\"{path}\" does not name a field")),
-    }
-}
-
-/// Descend one path segment, creating a missing object key on the way.
-fn step<'a>(cur: &'a mut Value, seg: &str, path: &str) -> Result<&'a mut Value, String> {
-    match cur {
-        Value::Array(a) => {
-            let i: usize = seg
-                .parse()
-                .map_err(|_| format!("\"{path}\": \"{seg}\" is not an array index"))?;
-            let n = a.len();
-            a.get_mut(i)
-                .ok_or_else(|| format!("\"{path}\": index {i} is past the end ({n} items)"))
-        }
-        Value::Object(o) => Ok(o.entry(seg.to_string()).or_insert_with(|| json!({}))),
-        _ => Err(format!("\"{path}\": \"{seg}\" is not an object in settings")),
-    }
-}
+/// Writing a swept value into the settings JSON is the optimizer's `set_path` — same grammar,
+/// same array indexing, one implementation.
+use crate::backtest::optimize::set_path;
 
 /// Cartesian product of the grid axes, in a stable order (BTreeMap keys sort).
 fn expand_grid(grid: &std::collections::BTreeMap<String, Vec<Value>>) -> Vec<Vec<(String, Value)>> {
@@ -600,10 +542,22 @@ async fn sweep(
                 sharpes.push(s);
             }
         }
+        // `return_pct` is net PnL over the money in, and a DCA axis can move the money in
+        // itself: two trials are then percentages of different denominators. The figures that
+        // make them comparable ride along, so the table can show what each trial paid in.
+        let dca = result.dca.as_ref().map(|d| {
+            json!({
+                "contributed": d.contributed,
+                "final_value": d.final_value,
+                "twr_pct": d.twr_pct,
+                "irr_pct": d.irr_pct,
+            })
+        });
         trials.push(json!({
             "params": params,
             "run_id": run_id,
             "trades": result.stats.trades,
+            "net_pnl": result.stats.net_pnl,
             "return_pct": result.stats.return_pct,
             "sharpe": result.stats.sharpe,
             "sortino": result.stats.sortino,
@@ -611,11 +565,36 @@ async fn sweep(
             "profit_factor": result.stats.profit_factor,
             "win_rate": result.stats.win_rate,
             "oos": result.oos,
+            "dca": dca,
         }));
     }
 
     let total_bars: usize = assets.iter().map(|a| a.ts.len()).sum();
-    let deflated = quant::deflated_sharpe(&sharpes, total_bars);
+    let deflated =
+        quant::deflated_sharpe(&sharpes, total_bars, quant::periods_per_year(&assets[0].timeframe));
+    // `return_pct` is net PnL over the money in, and a DCA axis can move the money in itself:
+    // ranking on it then rewards the trial that paid in the least, which is not a finding. It
+    // is read off the trials rather than off the axis names, because a rule's threshold moves
+    // the total just as much as the contribution does.
+    let mut notes: Vec<String> = Vec::new();
+    let paid_in: Vec<f64> = trials
+        .iter()
+        .filter_map(|t| t.get("dca")?.get("contributed")?.as_f64())
+        .collect();
+    let (lo, hi) = paid_in.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+    if paid_in.len() == trials.len() && paid_in.len() > 1 && hi > lo * 1.001 {
+        notes.push(format!(
+            "the trials paid in between {lo:.0} and {hi:.0}, so `return_pct` is a percentage of \
+             a different amount in each of them. Compare `twr_pct` (deposit-proof), or read \
+             `dca.contributed` next to each row."
+        ));
+    }
+    if trials.len() > 1 && sharpes.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+        notes.push(
+            "every trial produced the same result: the swept paths are config this strategy              kind does not read. Check them against /api/backtest/optimize/params."
+                .into(),
+        );
+    }
     Ok(Json(json!({
         "ticker": assets[0].ticker,
         "timeframe": assets[0].timeframe,
@@ -623,6 +602,7 @@ async fn sweep(
         "trial_count": trials.len(),
         "grid": body.grid,
         "trials": trials,
+        "notes": notes,
         "sharpe_distribution": quant::spread(&sharpes),
         "deflated_sharpe": deflated,
     })))
@@ -795,8 +775,118 @@ async fn delete_run(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Deterministic Markdown report for a saved run, generated from its stored settings + stats
-/// snapshot (no rerun — always available, diffable between runs, feeds the editor later).
+/// Everything a report shows beyond the stored snapshot (the equity curve, the per-asset
+/// split, the OOS blocks, the execution counters) comes from replaying the run over its
+/// own datasets and window. The replay is deterministic (same settings, same bars), records
+/// nothing, and returns `Null` when it can't happen (dataset deleted, settings from another
+/// engine shape): the report then falls back to the snapshot alone.
+async fn replay_extra(state: &AppState, run: &store::SavedRun) -> Value {
+    let ids: Vec<Uuid> = match run.dataset_ids.as_deref() {
+        Some(v) if !v.is_empty() => v.to_vec(),
+        _ => match run.dataset_id {
+            Some(id) => vec![id],
+            None => return Value::Null,
+        },
+    };
+    let settings: Settings = match serde_json::from_value(run.settings.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("report replay skipped, settings unreadable: {e}");
+            return Value::Null;
+        }
+    };
+    // Same bar budget the /run endpoint defaults to, so a report replays the run the UI made.
+    let assets = match load_assets(state, &ids, 50_000, run.bars_from, run.bars_to).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!("report replay skipped, datasets unavailable: {}", e.message);
+            return Value::Null;
+        }
+    };
+    let bars: Vec<Bars> = assets.iter().map(|a| a.as_bars()).collect();
+    let refs: Vec<&Bars> = bars.iter().collect();
+    let r = backtest::run_portfolio(&settings, &refs);
+    json!({
+        "stats": r.stats,
+        "bars": assets.iter().map(|a| a.ts.len()).sum::<usize>(),
+        "first_ts": assets.iter().filter_map(|a| a.ts.first()).min(),
+        "last_ts": assets.iter().filter_map(|a| a.ts.last()).max(),
+        "equity": r.equity,
+        // Lean projection of the closed trades: what the report's statistics tables are
+        // derived from. The trade list itself is never printed.
+        "trades": r.trades.iter().map(|t| json!({
+            "ticker": t.ticker,
+            "direction": t.direction,
+            "pnl": t.pnl,
+            "return_pct": t.return_pct,
+            "mae": t.mae,
+            "mfe": t.mfe,
+            "bars_held": t.bars_held,
+        })).collect::<Vec<_>>(),
+        "per_asset": r.per_asset,
+        "oos": r.oos,
+        "grid": r.grid,
+        "dca": dca_headline(r.dca.as_ref()),
+        "warmup_bars": r.warmup_bars,
+        "trading_start_ts": r.trading_start_ts,
+        "skipped_min_size": r.skipped_min_size,
+        "skipped_margin": r.skipped_margin,
+        "halted_bars": r.halted_bars,
+        "filtered_bars": r.filtered_bars,
+        "total_funding": r.total_funding,
+    })
+}
+
+/// The DCA block without its three curves and its fill list: the headline a summary view (or a
+/// report replay) reads, with the unbounded arrays left behind.
+fn dca_headline(d: Option<&backtest::dca::DcaStats>) -> Value {
+    let Some(d) = d else { return Value::Null };
+    let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        for k in ["contributed_curve", "cost_curve", "events"] {
+            o.remove(k);
+        }
+        // `events_total` stays: it is the count, not the list, and a summary reader needs to
+        // know how many fills the plan made.
+    }
+    v
+}
+
+/// A report file is named after the strategy it came from, plus the moment it was exported,
+/// so two exports of the same strategy never collide: `my_strategy_20260818-094500`. A run
+/// with no strategy behind it falls back to `otw_strategy`.
+fn report_filename(strategy: Option<&str>, ext: &str) -> String {
+    let stamp = OffsetDateTime::now_utc()
+        .format(&time::macros::format_description!(
+            "[year][month][day]-[hour][minute][second]"
+        ))
+        .unwrap_or_default();
+    let base = strategy.map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| "otw_strategy".into());
+    format!("{base}_{stamp}.{ext}")
+}
+
+/// Filename-safe form of a user-chosen name: ASCII word characters, everything else folded to
+/// a single underscore.
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').chars().take(60).collect()
+}
+
+/// Name of the strategy a run came from, when it still exists.
+async fn run_strategy_name(state: &AppState, run: &store::SavedRun) -> Option<String> {
+    let id = run.strategy_id?;
+    store::get_strategy(&state.pool, id).await.ok().flatten().map(|s| s.name)
+}
+
+/// Markdown report for a saved run: the results screen as a document (headline stats, curve,
+/// strategy, All/Long/Short performance, OOS, per-asset) and never the trade list.
 async fn report_md(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -805,8 +895,28 @@ async fn report_md(
     let run = store::get_run(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("run not found"))?;
-    let md = crate::backtest::report::run_report_md(&run.name, &run.ticker, &run.timeframe, &run.settings, &run.stats);
-    Ok(([(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+    let extra = replay_extra(&state, &run).await;
+    let doc = crate::backtest::report::RunDoc::new(
+        &run.name,
+        &run.ticker,
+        &run.timeframe,
+        &run.settings,
+        &run.stats,
+    )
+    .with_extra(&extra);
+    let md = crate::backtest::report::run_report_md(&doc);
+    let filename = report_filename(run_strategy_name(&state, &run).await.as_deref(), "md");
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8".to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        md,
+    )
+        .into_response())
 }
 
 /// Same report as `report.md`, rendered to PDF by the shared report engine.
@@ -818,14 +928,16 @@ async fn report_pdf(
     let run = store::get_run(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("run not found"))?;
-    let doc = crate::backtest::report::run_report(
+    let extra = replay_extra(&state, &run).await;
+    let doc = crate::backtest::report::RunDoc::new(
         &run.name,
         &run.ticker,
         &run.timeframe,
         &run.settings,
         &run.stats,
-    );
-    let pdf = crate::report::pdf::render(&doc);
+    )
+    .with_extra(&extra);
+    let pdf = crate::report::pdf::render(&crate::backtest::report::run_report(&doc));
     let safe: String = run
         .name
         .chars()
@@ -970,6 +1082,9 @@ pub(crate) struct StrategyBody {
     name: String,
     #[serde(default)]
     description: String,
+    /// Free-form labels; the library's search box matches them alongside the name.
+    #[serde(default)]
+    tags: Vec<String>,
     /// Stored raw (the handler validates it by deserializing into `Settings` separately), but
     /// advertised with the real engine schema — an MCP agent handed an untyped `settings`
     /// invents field names, which is exactly how `mode: "percent_equity"` happens.
@@ -1019,9 +1134,15 @@ async fn create_strategy(
     Json(body): Json<StrategyBody>,
 ) -> Result<Json<Value>, ApiError> {
     check_strategy(&body)?;
-    let id = store::create_strategy(&state.pool, body.name.trim(), body.description.trim(), &body.settings)
-        .await
-        .map_err(|e| name_taken(e, "strategy"))?;
+    let id = store::create_strategy(
+        &state.pool,
+        body.name.trim(),
+        body.description.trim(),
+        &body.tags,
+        &body.settings,
+    )
+    .await
+    .map_err(|e| name_taken(e, "strategy"))?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -1031,9 +1152,16 @@ async fn update_strategy(
     Json(body): Json<StrategyBody>,
 ) -> Result<Json<Value>, ApiError> {
     check_strategy(&body)?;
-    let ok = store::update_strategy(&state.pool, id, body.name.trim(), body.description.trim(), &body.settings)
-        .await
-        .map_err(|e| name_taken(e, "strategy"))?;
+    let ok = store::update_strategy(
+        &state.pool,
+        id,
+        body.name.trim(),
+        body.description.trim(),
+        &body.tags,
+        &body.settings,
+    )
+    .await
+    .map_err(|e| name_taken(e, "strategy"))?;
     if !ok {
         return Err(ApiError::not_found("strategy not found"));
     }
@@ -1246,6 +1374,19 @@ mod window_tests {
     fn plain_date_end_bound_covers_the_day() {
         assert_eq!(ok(parse_bound("2024-06-30", false)), rfc("2024-06-30T00:00:00Z"));
         assert_eq!(ok(parse_bound("2024-06-30", true)), rfc("2024-06-30T23:59:59Z"));
+    }
+
+    #[test]
+    fn report_files_are_named_after_the_strategy() {
+        let named = report_filename(Some("My BTC Scalper v2"), "md");
+        assert!(named.starts_with("my_btc_scalper_v2_"), "{named}");
+        assert!(named.ends_with(".md"));
+        // strategy + "_" + 8 digits + "-" + 6 digits + ".md"
+        assert_eq!(named.len(), "my_btc_scalper_v2".len() + 1 + 15 + 3);
+        assert!(report_filename(None, "md").starts_with("otw_strategy_"));
+        assert!(report_filename(Some("   "), "md").starts_with("otw_strategy_"));
+        // Anything outside ASCII word characters folds to one underscore.
+        assert_eq!(slug("Ünïcode / slashes"), "n_code_slashes");
     }
 
     #[test]

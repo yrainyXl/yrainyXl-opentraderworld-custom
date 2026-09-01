@@ -133,18 +133,20 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-height: var(--control-h);
     background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border-control);
+    border-radius: 0;
     color: var(--text);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-3);
     font: inherit;
-    font-size: var(--text-base);
+    font-size: var(--text-sm);
     cursor: pointer;
     text-align: left;
+    transition: border-color var(--dur-fast) var(--ease);
   }
   .trigger:hover {
-    border-color: var(--border-control);
+    border-color: var(--accent);
   }
   .trigger.placeholder .meta {
     color: var(--muted);
@@ -168,12 +170,12 @@
   .menu {
     position: absolute;
     z-index: 30;
-    top: calc(100% + 6px);
+    top: calc(100% + 4px);
     left: 0;
     right: 0;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border-control);
+    border-radius: 0;
     box-shadow: var(--shadow-2);
     padding: var(--space-2);
   }
@@ -208,8 +210,8 @@
     background: none;
     border: none;
     color: var(--text);
-    padding: var(--space-2);
-    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
+    border-radius: 0;
     cursor: pointer;
     font: inherit;
     font-size: var(--text-sm);

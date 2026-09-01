@@ -166,8 +166,8 @@ async fn create_category(
     Ok(Json(json!({ "category": category })))
 }
 
-#[derive(Deserialize)]
-struct CategoryPatch {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct CategoryPatch {
     name: Option<String>,
     color: Option<String>,
     position: Option<f64>,
@@ -385,8 +385,8 @@ async fn create_routine(
     Ok(Json(json!({ "routine": routine })))
 }
 
-#[derive(Deserialize)]
-struct UpdateRoutineBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct UpdateRoutineBody {
     name: Option<String>,
     description: Option<String>,
     notes: Option<String>,
@@ -479,8 +479,8 @@ async fn delete_routine(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct DuplicateBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct DuplicateBody {
     name: Option<String>,
 }
 
@@ -502,8 +502,8 @@ async fn duplicate_routine(
     Ok(Json(json!({ "routine": routine })))
 }
 
-#[derive(Deserialize)]
-struct ReorderBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct ReorderBody {
     /// Template ids in their new display order.
     ids: Vec<Uuid>,
 }

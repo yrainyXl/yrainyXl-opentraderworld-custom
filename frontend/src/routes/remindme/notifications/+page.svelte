@@ -1,11 +1,12 @@
 <script>
   import Icon from '$lib/ui/Icon.svelte';
-  // Notifications page — the full history with unread pastilles, an "Acknowledge all"
-  // action, per-item read/open/delete, and a link back to reminders.
+  // Notifications page — the full history with unread pastilles, "Acknowledge all" and
+  // "Clear all" actions, per-item read/open/delete, and a link back to reminders.
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { remindApi, linkFor, kindLabel, fmtTime } from '$lib/modules/remindme/api.js';
   import { notifStore } from '$lib/modules/remindme/store.svelte.js';
+  import ConfirmModal from '$lib/ui/ConfirmModal.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { t } from '$lib/i18n';
@@ -25,6 +26,14 @@
 
   async function ackAll() {
     await notifStore.ackAll();
+    await load();
+  }
+
+  // Clearing wipes the history for good — ConfirmModal, not the browser's confirm().
+  let confirmClear = $state(false);
+
+  async function clearAll() {
+    await notifStore.clearAll();
     await load();
   }
 
@@ -56,7 +65,12 @@
       <h1>{$t('remindme.notifs.title')}</h1>
       {#if unread > 0}<span class="pastille">{$t('remindme.notifs.unread', { count: unread })}</span>{/if}
     </div>
-    <button class="ack" onclick={ackAll} disabled={unread === 0}>{$t('remindme.notifs.ackAll')}</button>
+    <div class="tools">
+      <button class="ack" onclick={ackAll} disabled={unread === 0}>{$t('remindme.notifs.ackAll')}</button>
+      <button class="ack clear" onclick={() => (confirmClear = true)} disabled={notifications.length === 0}>
+        {$t('remindme.notifs.clearAll')}
+      </button>
+    </div>
   </header>
 
   {#if loading}
@@ -116,6 +130,16 @@
   {/if}
 </div>
 
+<ConfirmModal
+  bind:open={confirmClear}
+  title={$t('remindme.notifs.clearAll')}
+  message={$t('remindme.notifs.confirmClear')}
+  confirmLabel={$t('remindme.notifs.clearAll')}
+  cancelLabel={$t('common.cancel')}
+  danger
+  onconfirm={clearAll}
+/>
+
 <style>
   .notifs {
     height: 100%;
@@ -157,6 +181,10 @@
     font-size: var(--text-xs);
     font-weight: var(--fw-medium);
   }
+  .tools {
+    display: flex;
+    gap: var(--space-2);
+  }
   .ack {
     background: transparent;
     border: 0.5px solid var(--border);
@@ -165,6 +193,10 @@
     padding: 7px 13px;
     cursor: pointer;
     font-size: var(--text-sm);
+  }
+  .ack.clear:hover:not(:disabled) {
+    color: var(--red);
+    border-color: var(--red);
   }
   .ack:disabled {
     opacity: 0.4;
@@ -228,6 +260,8 @@
   .name {
     font-weight: var(--fw-medium);
     font-size: var(--text-base);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .time {
     flex: none;
@@ -244,6 +278,8 @@
     font-size: var(--text-sm);
     color: var(--muted);
     white-space: pre-wrap;
+    /* A payload line can be one unbroken token (a ticker list); break it inside the card. */
+    overflow-wrap: anywhere;
   }
   .urllink {
     flex: none;

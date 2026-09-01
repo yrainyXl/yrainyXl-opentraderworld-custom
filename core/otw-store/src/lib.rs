@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 pub mod agent;
 pub mod api_quota;
+pub mod automator;
 pub mod api_rate;
 pub mod backtest;
 pub mod calendar;
@@ -26,6 +27,7 @@ pub mod goals;
 pub mod histdata;
 pub mod imports;
 pub mod journal;
+pub mod journal_analytics;
 pub mod journal_fx;
 pub mod journal_import;
 pub mod logs;

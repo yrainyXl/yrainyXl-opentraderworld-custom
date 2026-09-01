@@ -1533,6 +1533,10 @@
     outline: none;
     border-color: var(--accent);
   }
+  /* Send / stop sits on the composer's line, not the shorter default control. */
+  .composer :global(.btn) {
+    height: 40px;
+  }
   .center {
     text-align: center;
     margin-top: var(--space-6);

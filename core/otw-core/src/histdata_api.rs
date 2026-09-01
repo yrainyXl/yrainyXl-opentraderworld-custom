@@ -6,6 +6,8 @@
 //!
 //! - `POST /api/histdata/downloads`            queue a download job (connector_id or provider)
 //! - `GET  /api/histdata/jobs`                 recent jobs (download-page progress)
+//! - `DELETE /api/histdata/jobs/{id}`          cancel one job (running = stop at next chunk)
+//! - `DELETE /api/histdata/jobs/batch/{id}`    cancel what is left of a batch
 //! - `GET  /api/histdata/datasets`             catalog (management page)
 //! - `POST /api/histdata/datasets/{id}/append` gap-fill a dataset (max(ts)→now)
 //! - `GET  /api/histdata/datasets/{id}/bars`   OHLCV JSON for the visualization module
@@ -51,6 +53,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/histdata/symbols", get(symbols))
         .route("/api/histviz/series", post(series))
         .route("/api/histdata/jobs", get(jobs))
+        .route("/api/histdata/jobs/batch/{id}", delete(cancel_batch))
+        .route("/api/histdata/jobs/{id}", delete(cancel_job))
         .route("/api/histdata/datasets", get(datasets))
         .route("/api/histdata/datasets/{id}/append", post(append))
         .route("/api/histdata/datasets/{id}/bars", get(bars))
@@ -223,6 +227,31 @@ pub(crate) struct DownloadBody {
     from: String,
     /// RFC3339 exclusive end.
     to: String,
+    /// Extra symbols to queue alongside `ticker` (batch download).
+    #[serde(default)]
+    tickers: Vec<String>,
+    /// Extra timeframes to queue alongside `timeframe` (batch download).
+    #[serde(default)]
+    timeframes: Vec<String>,
+    /// Queue nothing: answer with the `estimate` block only. Lets the form show what a
+    /// batch will cost in provider requests before the user commits to it.
+    #[serde(default)]
+    estimate_only: bool,
+}
+
+/// Ceiling on one batch, so a paste of a few hundred symbols can't flood the queue.
+const MAX_BATCH_JOBS: usize = 100;
+
+/// `first` plus `rest`, trimmed, empties dropped, order kept, duplicates removed.
+fn merge_list(first: &str, rest: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for v in std::iter::once(first).chain(rest.iter().map(|s| s.as_str())) {
+        let v = v.trim();
+        if !v.is_empty() && !out.iter().any(|k| k == v) {
+            out.push(v.to_string());
+        }
+    }
+    out
 }
 
 fn parse_rfc3339(s: &str, field: &str) -> Result<OffsetDateTime, ApiError> {
@@ -234,9 +263,22 @@ async fn start_download(
     State(state): State<AppState>,
     Json(b): Json<DownloadBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let ticker = b.ticker.trim();
-    if ticker.is_empty() {
+    // One request can queue several instruments: every ticker × every timeframe, all on the
+    // same connector and the same window. A single pair behaves exactly as before.
+    let tickers = merge_list(&b.ticker, &b.tickers);
+    if tickers.is_empty() {
         return Err(ApiError::bad_request("ticker is required"));
+    }
+    let timeframes = merge_list(&b.timeframe, &b.timeframes);
+    if timeframes.is_empty() {
+        return Err(ApiError::bad_request("timeframe is required"));
+    }
+    if tickers.len() * timeframes.len() > MAX_BATCH_JOBS {
+        return Err(ApiError::bad_request(&format!(
+            "too many downloads at once ({} tickers × {} timeframes, max {MAX_BATCH_JOBS})",
+            tickers.len(),
+            timeframes.len()
+        )));
     }
     // Resolve the connector: explicit id wins; a bare provider (MCP / legacy clients)
     // maps to that provider's default connector when one exists.
@@ -256,37 +298,163 @@ async fn start_download(
         }
     };
     // Enforce the capability matrix server-side (the UI greys these out, but never trust it).
-    histdata::validate_request(&provider, &b.asset_type, &b.timeframe)
-        .map_err(|e| ApiError::bad_request(&e.to_string()))?;
+    // One unsupported timeframe in a batch is reported and skipped, not fatal; if none is
+    // supported the request fails as a single download always did.
+    let mut errors: Vec<Value> = Vec::new();
+    let mut usable: Vec<&str> = Vec::new();
+    for tf in &timeframes {
+        match histdata::validate_request(&provider, &b.asset_type, tf) {
+            Ok(_) => usable.push(tf.as_str()),
+            Err(e) => errors.push(json!({ "timeframe": tf, "error": e.to_string() })),
+        }
+    }
+    if usable.is_empty() {
+        let msg = errors
+            .first()
+            .and_then(|e| e["error"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "unsupported timeframe".into());
+        return Err(ApiError::bad_request(&msg));
+    }
     let from = parse_rfc3339(&b.from, "from")?;
     let to = parse_rfc3339(&b.to, "to")?;
     if from >= to {
         return Err(ApiError::bad_request("'from' must be before 'to'"));
     }
 
-    let dataset_id =
-        store::upsert_dataset(&state.pool, &provider, &b.asset_type, ticker, &b.timeframe).await?;
-    let job_id = store::enqueue_job(
-        &state.pool,
-        &store::NewJob {
-            dataset_id,
-            connector_id,
-            provider: &provider,
-            asset_type: &b.asset_type,
-            ticker,
-            timeframe: &b.timeframe,
-            range_from: from,
-            range_to: to,
-            kind: "download",
-        },
-    )
-    .await?;
-    Ok(Json(json!({ "job_id": job_id, "dataset_id": dataset_id })))
+    // What this will cost the provider, before anything is written. The same block rides
+    // back with a real queueing, so the page can say why a batch is about to wait.
+    let estimate = estimate_cost(&state, connector_id, &provider, &tickers, &usable, from, to).await;
+    if b.estimate_only {
+        return Ok(Json(json!({ "estimate": estimate, "errors": errors })));
+    }
+
+    // A batch is one submission: its jobs share a `batch_id` so the page can summarize them
+    // and cancel what is left in one click. A lone download keeps no batch.
+    let batch_id = (tickers.len() * usable.len() > 1).then(Uuid::new_v4);
+    let mut queued: Vec<Value> = Vec::new();
+    for ticker in &tickers {
+        for timeframe in &usable {
+            let dataset_id =
+                store::upsert_dataset(&state.pool, &provider, &b.asset_type, ticker, timeframe)
+                    .await?;
+            let job_id = store::enqueue_job(
+                &state.pool,
+                &store::NewJob {
+                    dataset_id,
+                    connector_id,
+                    provider: &provider,
+                    asset_type: &b.asset_type,
+                    ticker,
+                    timeframe,
+                    range_from: from,
+                    range_to: to,
+                    kind: "download",
+                    batch_id,
+                },
+            )
+            .await?;
+            queued.push(json!({
+                "ticker": ticker,
+                "timeframe": timeframe,
+                "job_id": job_id,
+                "dataset_id": dataset_id,
+            }));
+        }
+    }
+    // `job_id`/`dataset_id` stay at the top level (first pair queued) so single-download
+    // callers, MCP agents included, read the same shape they always have.
+    Ok(Json(json!({
+        "job_id": queued[0]["job_id"],
+        "dataset_id": queued[0]["dataset_id"],
+        "batch_id": batch_id,
+        "jobs": queued,
+        "errors": errors,
+        "estimate": estimate,
+    })))
+}
+
+/// How many provider requests a (batch) download needs, against the connector's declared
+/// quota. Chunk count per pair mirrors the worker's own paging: one request per
+/// `max_bars_per_req` bars of the window. Everything here is advisory — the quota is
+/// observe-only at queue time, the worker is what actually waits for it.
+async fn estimate_cost(
+    state: &AppState,
+    connector_id: Option<Uuid>,
+    provider: &str,
+    tickers: &[String],
+    timeframes: &[&str],
+    from: OffsetDateTime,
+    to: OffsetDateTime,
+) -> Value {
+    let cap = match histdata::connector_for(provider) {
+        Ok(c) => c.capability(),
+        Err(_) => return Value::Null,
+    };
+    let span = (to - from).whole_seconds().max(0);
+    let mut requests: i64 = 0;
+    for tf in timeframes {
+        let Ok(secs) = histdata::timeframe_secs(tf) else { continue };
+        let step = (secs * cap.max_bars_per_req.max(1) as i64).max(1);
+        // Ceiling division: a window shorter than one page is still one request.
+        let chunks = ((span + step - 1) / step).max(1);
+        requests += tickers.len() as i64 * chunks;
+    }
+    // Wall-clock floor: the worker paces requests to stay under the published limit.
+    let seconds = requests * cap.min_interval_ms as i64 / 1000;
+    let quota = match connector_id {
+        Some(id) => otw_store::api_quota::get(&state.pool, &crate::connectors_api::quota_scope(id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let (used, max, period, resets_at) = match &quota {
+        Some(q) => (
+            q.used,
+            q.max_requests,
+            q.period.clone(),
+            q.resets_at.format(&Rfc3339).unwrap_or_default(),
+        ),
+        None => (0, None, String::new(), String::new()),
+    };
+    json!({
+        "jobs": tickers.len() * timeframes.len(),
+        "requests": requests,
+        "seconds": seconds,
+        "quota_used": used,
+        "quota_max": max,
+        "quota_period": period,
+        "quota_resets_at": resets_at,
+        // True when the batch cannot fit in what is left of the window: the worker will
+        // download what it can, then park until the quota rolls over.
+        "over_quota": max.is_some_and(|m| used + requests > m),
+    })
 }
 
 async fn jobs(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let jobs = store::list_jobs(&state.pool, 50).await?;
     Ok(Json(json!({ "jobs": jobs })))
+}
+
+/// Stop one job. Queued or parked, it ends immediately; running, it is asked to stop and
+/// the worker closes it at the next chunk boundary, keeping the bars already written.
+async fn cancel_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let status = store::cancel_job(&state.pool, id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("job is already finished"))?;
+    Ok(Json(json!({ "id": id, "status": status })))
+}
+
+/// Stop every job of a batch that has not finished yet.
+async fn cancel_batch(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let cancelled = store::cancel_batch(&state.pool, id).await?;
+    Ok(Json(json!({ "batch_id": id, "cancelled": cancelled })))
 }
 
 // ── Preview (look now, store later) ──────────────────────────────────────────────
@@ -491,6 +659,7 @@ async fn save_preview(
             range_from: from,
             range_to: to,
             kind: "download",
+            batch_id: None,
         },
     )
     .await?;
@@ -959,6 +1128,7 @@ async fn append(
             range_from: from,
             range_to: to,
             kind: "append",
+            batch_id: None,
         },
     )
     .await?;

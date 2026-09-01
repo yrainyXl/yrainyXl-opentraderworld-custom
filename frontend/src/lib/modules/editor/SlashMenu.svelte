@@ -20,7 +20,10 @@
     { labelKey: 'editor.slashMenu.divider', hintKey: 'editor.slashMenu.dividerHint', run: (c) => c.setHorizontalRule() },
     { labelKey: 'editor.slashMenu.link', hintKey: 'editor.slashMenu.linkHint', promptKey: 'editor.slashMenu.linkUrl', run: (c, url) => c.extendMarkRange('link').setLink({ href: url }) },
     { labelKey: 'editor.slashMenu.imageUpload', hintKey: 'editor.slashMenu.imageUploadHint', upload: true, run: (c, url) => c.setImage({ src: url }) },
-    { labelKey: 'editor.slashMenu.imageByUrl', hintKey: 'editor.slashMenu.imageByUrlHint', promptKey: 'editor.slashMenu.imageUrl', run: (c, url) => c.setImage({ src: url }) }
+    { labelKey: 'editor.slashMenu.imageByUrl', hintKey: 'editor.slashMenu.imageByUrlHint', promptKey: 'editor.slashMenu.imageUrl', run: (c, url) => c.setImage({ src: url }) },
+    // `video` routes through the core resolver first (provider lookup + poster download);
+    // Editor passes the resolved reference here, not the URL the user typed.
+    { labelKey: 'editor.slashMenu.video', hintKey: 'editor.slashMenu.videoHint', video: true, promptKey: 'editor.slashMenu.videoUrl', run: (c, ref) => c.setVideoEmbed(ref) }
   ];
 
   const filtered = $derived(

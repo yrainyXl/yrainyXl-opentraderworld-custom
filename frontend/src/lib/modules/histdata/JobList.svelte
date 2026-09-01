@@ -2,15 +2,19 @@
   // Recent download jobs with live progress. The page polls and passes jobs in.
   // A filter bar narrows by status / provider / ticker / timeframe.
   // Finished jobs link to the Visualization module to chart the dataset they filled.
+  // A job that hit the provider's limits is `waiting`: it shows why and when it resumes,
+  // and every unfinished job can be cancelled (a batch, in one click).
   import { goto } from '$app/navigation';
   import Button from '$lib/ui/Button.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
+  import Icon from '$lib/ui/Icon.svelte';
   import { copyLog } from '$lib/ui/copyLog.js';
   import { infiniteScroll } from '$lib/ui/infiniteScroll.js';
   import { t } from '$lib/i18n';
   import { fmtNum } from '$lib/format.js';
+  import { histdataApi } from './api.js';
 
-  let { jobs = [] } = $props();
+  let { jobs = [], onchanged } = $props();
 
   // Filters persist across refresh (per-browser).
   const FILTERS_KEY = 'otw.histdata.jobFilters.v1';
@@ -50,7 +54,11 @@
 
   // Filter dropdowns: the "" entry is the no-filter row, so it is an option like any other.
   const opts = (all, values) => [{ value: '', label: all }, ...values.map((v) => ({ value: v, label: v }))];
-  const statusOpts = $derived(opts($t('histdata.jobs.allStatus'), statuses));
+  // Statuses read as words, not as the wire value the badge used to print.
+  const statusOpts = $derived([
+    { value: '', label: $t('histdata.jobs.allStatus') },
+    ...statuses.map((v) => ({ value: v, label: $t(`histdata.jobs.status.${v}`) }))
+  ]);
   const providerOpts = $derived(opts($t('histdata.jobs.allProviders'), providers));
   const timeframeOpts = $derived(opts($t('histdata.jobs.allTimeframes'), timeframes));
 
@@ -95,10 +103,93 @@
   const statusColor = {
     queued: 'var(--muted)',
     running: 'var(--accent)',
+    waiting: 'var(--amber)',
+    cancelling: 'var(--muted)',
+    cancelled: 'var(--muted)',
     done: 'var(--green)',
     partial: 'var(--amber)',
     error: 'var(--red)'
   };
+
+  // ── Waiting jobs: the countdown to resume_at ──
+  const LIVE = new Set(['queued', 'running', 'waiting', 'cancelling']);
+  const isLive = (j) => LIVE.has(j.status);
+  const anyWaiting = $derived(jobs.some((j) => j.status === 'waiting' && j.resume_at));
+
+  // One clock for the whole list, ticking only while something is counting down.
+  let now = $state(Date.now());
+  $effect(() => {
+    if (!anyWaiting) return;
+    const id = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(id);
+  });
+
+  /** "4 min 12 s" until the job resumes, or '' once the instant has passed. */
+  function countdown(j) {
+    if (!j.resume_at) return '';
+    const left = Math.round((new Date(j.resume_at).getTime() - now) / 1000);
+    if (left <= 0) return '';
+    if (left < 60) return `${left} s`;
+    if (left < 3600) return `${Math.floor(left / 60)} min ${left % 60} s`;
+    return `${Math.floor(left / 3600)} h ${Math.floor((left % 3600) / 60)} min`;
+  }
+  function waitText(j) {
+    const left = countdown(j);
+    const why =
+      j.wait_reason === 'quota'
+        ? $t('histdata.jobs.waitQuota')
+        : $t('histdata.jobs.waitRateLimit');
+    return left ? $t('histdata.jobs.waitResumes', { why, left }) : $t('histdata.jobs.waitSoon', { why });
+  }
+
+  // ── Batches ──
+  // Jobs arrive newest-first; the header rides on the first row of each batch and counts
+  // over the whole batch, not just what is currently visible.
+  const batchOf = (id) => jobs.filter((j) => j.batch_id === id);
+  function batchStat(id) {
+    const all = batchOf(id);
+    return {
+      total: all.length,
+      done: all.filter((j) => j.status === 'done').length,
+      live: all.filter(isLive).length,
+      waiting: all.filter((j) => j.status === 'waiting').length
+    };
+  }
+  // First visible row of each batch, so the header is rendered exactly once.
+  const batchHead = $derived.by(() => {
+    const seen = new Set();
+    const heads = new Set();
+    for (const j of visible) {
+      if (!j.batch_id || seen.has(j.batch_id)) continue;
+      seen.add(j.batch_id);
+      heads.add(j.id);
+    }
+    return heads;
+  });
+
+  let busyId = $state('');
+  async function cancel(j) {
+    busyId = j.id;
+    try {
+      await histdataApi.cancelJob(j.id);
+      onchanged?.();
+    } catch {
+      /* the row refreshes on the next poll */
+    } finally {
+      busyId = '';
+    }
+  }
+  async function cancelBatch(id) {
+    busyId = id;
+    try {
+      await histdataApi.cancelBatch(id);
+      onchanged?.();
+    } catch {
+      /* idem */
+    } finally {
+      busyId = '';
+    }
+  }
 </script>
 
 <div class="filters">
@@ -134,10 +225,32 @@
     <p class="empty">{$t('histdata.jobs.emptyFiltered')}</p>
   {/if}
   {#each visible as j (j.id)}
+    {#if batchHead.has(j.id)}
+      {@const st = batchStat(j.batch_id)}
+      <div class="batch">
+        <Icon name="layers" size={13} />
+        <span class="btxt">
+          {$t('histdata.jobs.batchSummary', { done: st.done, total: st.total })}
+          {#if st.waiting}
+            <span class="bwait">{$t('histdata.jobs.batchWaiting', { n: st.waiting })}</span>
+          {/if}
+        </span>
+        {#if st.live}
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busyId === j.batch_id}
+            onclick={() => cancelBatch(j.batch_id)}
+          >
+            {$t('histdata.jobs.cancelBatch', { n: st.live })}
+          </Button>
+        {/if}
+      </div>
+    {/if}
     <div class="job" style="--st:{statusColor[j.status] ?? 'var(--text)'}">
       <div class="head">
         <span class="sym">{j.ticker}</span>
-        <span class="badge">{j.status}</span>
+        <span class="badge">{$t(`histdata.jobs.status.${j.status}`)}</span>
         {#if charted.has(j.status) && j.dataset_id && j.bars_written > 0}
           <Button
             variant="ghost"
@@ -147,6 +260,18 @@
             title={$t('histdata.jobs.viewChart')}
           >
             {$t('histdata.jobs.viewChart')}
+          </Button>
+        {/if}
+        {#if isLive(j)}
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="x"
+            disabled={busyId === j.id || j.status === 'cancelling'}
+            onclick={() => cancel(j)}
+            title={$t('histdata.jobs.cancel')}
+          >
+            {j.status === 'cancelling' ? $t('histdata.jobs.cancelling') : $t('histdata.jobs.cancel')}
           </Button>
         {/if}
       </div>
@@ -163,6 +288,12 @@
         <span class="stat">{$t('histdata.jobs.barsChunks', { bars: fmtNum(j.bars_written, 0), done: j.chunks_done, total: j.chunks_total || '?' })}</span>
         <span class="pctval">{pct(j)}%</span>
       </div>
+      {#if j.status === 'waiting'}
+        <div class="wait">
+          <Icon name="clock" size={12} />
+          <span>{waitText(j)}</span>
+        </div>
+      {/if}
       {#if j.error}
         <div class="err" title="{j.error} — {$t('histdata.jobs.clickToCopy')}" use:copyLog={j.error}>
           <span class="err-ic">⚠</span>{j.error}
@@ -304,6 +435,39 @@
     font-weight: var(--fw-medium);
     color: var(--st);
     font-variant-numeric: tabular-nums;
+  }
+  /* Batch header: sits above the first job of a submission, counts the whole batch. */
+  .batch {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--muted);
+    font-size: var(--text-sm);
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .btxt {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .bwait {
+    color: var(--amber);
+  }
+  .batch > :global(.btn) {
+    margin-left: auto;
+  }
+  /* Why a job is paused, and when it comes back on its own. */
+  .wait {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--amber);
+    font-size: var(--text-xs);
+    background: color-mix(in srgb, var(--amber) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--amber) 25%, transparent);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
   }
   .err {
     display: flex;

@@ -175,8 +175,8 @@ async fn resolve_template(
         .ok_or_else(|| ApiError::not_found("no template for that phase"))
 }
 
-#[derive(Deserialize)]
-struct DeleteEntryBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct DeleteEntryBody {
     date: String,
     template_id: Option<Uuid>,
     phase: Option<String>,
@@ -287,8 +287,8 @@ async fn create_category(
     Ok(Json(json!({ "category": category })))
 }
 
-#[derive(Deserialize)]
-struct CategoryPatch {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct CategoryPatch {
     name: Option<String>,
     color: Option<String>,
     position: Option<f64>,
@@ -443,8 +443,8 @@ async fn create_template(
     Ok(Json(json!({ "template": template })))
 }
 
-#[derive(Deserialize)]
-struct UpdateTemplateBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct UpdateTemplateBody {
     name: Option<String>,
     description: Option<String>,
     notes: Option<String>,
@@ -510,8 +510,8 @@ async fn delete_template(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct DuplicateBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct DuplicateBody {
     name: Option<String>,
 }
 

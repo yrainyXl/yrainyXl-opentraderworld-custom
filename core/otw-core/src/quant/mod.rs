@@ -2,8 +2,8 @@
 //!
 //! Everything here is stateless and dependency-free: callers pass aligned close-price
 //! series (or simple period returns) and get back metrics ready to serialize. The API
-//! layer is responsible for loading bars from histdata and aligning multi-asset series
-//! by timestamp before calling in.
+//! layer loads bars from histdata and aligns multi-asset series through
+//! [`crate::align`] before calling in.
 //!
 //! Conventions:
 //! - "returns" are simple period returns r_t = p_t / p_{t-1} - 1.
@@ -15,31 +15,25 @@ use serde::Serialize;
 
 /// Trading periods per year for a histdata timeframe string (e.g. "1d", "1h", "15m").
 /// Falls back to daily (252) for anything unrecognized.
+///
+/// This is the **nominal** factor, a convention table: it cannot know that a daily crypto
+/// series holds 365 periods a year and a daily equity series 252, and it is meaningless for
+/// a merged multi-asset clock. Multi-asset callers annualize with
+/// [`crate::align::observed_ppy`], which measures the clock, and pass this only as the
+/// fallback for a sample too short to measure.
 pub fn periods_per_year(timeframe: &str) -> f64 {
-    let raw = timeframe.trim();
-    // Charting convention: a CAPITAL "M" suffix means months; lowercase "m" is minutes.
-    // Decide before lowercasing, or a future "1M" timeframe would annualize as 1-minute
-    // bars (off by five orders of magnitude).
-    let capital_month = raw.ends_with('M');
-    let tf = raw.to_lowercase();
-    // Split into number + unit.
+    if let Ok(tf) = crate::timeframe::Timeframe::parse(timeframe) {
+        return tf.periods_per_year();
+    }
+    // Unrecognized: keep the historical behaviour of reading the leading count, if any, and
+    // treating the rest as days.
+    let tf = timeframe.trim().to_lowercase();
     let split = tf.find(|c: char| c.is_alphabetic()).unwrap_or(tf.len());
-    let (num, unit) = tf.split_at(split);
-    let n: f64 = num.parse().unwrap_or(1.0);
+    let n: f64 = tf[..split].parse().unwrap_or(1.0);
     if n <= 0.0 {
         return 252.0;
     }
-    // ~6.5 trading hours/day, 252 trading days/year.
-    let per_year = match unit {
-        _ if capital_month => 12.0 / n,
-        "m" | "min" => 252.0 * 6.5 * 60.0 / n,
-        "h" | "hour" => 252.0 * 6.5 / n,
-        "d" | "day" => 252.0 / n,
-        "w" | "wk" | "week" => 52.0 / n,
-        "mo" | "month" => 12.0 / n,
-        _ => 252.0 / n,
-    };
-    per_year.max(1.0)
+    (252.0 / n).max(1.0)
 }
 
 /// Simple period returns from a close series. Length is `closes.len() - 1`.
@@ -153,13 +147,19 @@ pub struct DeflatedSharpe {
 }
 
 /// Deflated Sharpe for a set of trial Sharpes (annualized), given the number of observations
-/// each was computed over.
+/// each was computed over and the periods-per-year those Sharpes were annualized with
+/// (see [`periods_per_year`]) — the latter is what de-annualizes them back to the estimate's
+/// own scale, so passing the wrong one silently flattens PSR against the sample size.
 ///
 /// Simplifying assumptions, stated because they change the number: returns are treated as
 /// normal (no skew/kurtosis adjustment — the engine does not carry the moments of the equity
 /// curve), and the trials are treated as if they varied independently. Both make this a
 /// *floor* on how much to discount the winner, never a ceiling.
-pub fn deflated_sharpe(trial_sharpes: &[f64], observations: usize) -> Option<DeflatedSharpe> {
+pub fn deflated_sharpe(
+    trial_sharpes: &[f64],
+    observations: usize,
+    periods_per_year: f64,
+) -> Option<DeflatedSharpe> {
     let n_trials = trial_sharpes.len();
     if n_trials == 0 || observations < 3 {
         return None;
@@ -183,11 +183,23 @@ pub fn deflated_sharpe(trial_sharpes: &[f64], observations: usize) -> Option<Def
     };
     // PSR(threshold): P(true SR > threshold) under normality, with the Sharpe expressed
     // per-observation (the engine annualizes; the test is on the estimate's own scale).
+    //
+    // De-annualize by `sqrt(periods_per_year)` — the exact factor `risk_ratios` multiplied by —
+    // NOT by `sqrt(observations)`. Those coincide only for a one-year run, and using the wrong
+    // one cancels the `sqrt(t - 1)` term below, which flattens PSR against sample size and
+    // destroys the whole point of the statistic (a 10-year record must beat a 6-month one).
     let t = observations as f64;
+    let ann = periods_per_year.max(1.0).sqrt();
+    // A per-observation Sharpe at or above 1 is outside the model (the estimator's variance
+    // term `1 - sr^2` goes non-positive). Refuse the whole verdict rather than clamping it into
+    // a confident-looking number.
+    if (best / ann).abs() >= 1.0 {
+        return None;
+    }
     let psr = |threshold: f64| -> f64 {
-        let sr = best / t.sqrt();
-        let thr = threshold / t.sqrt();
-        let denom = (1.0 - sr * sr).max(1e-12).sqrt();
+        let sr = best / ann;
+        let thr = threshold / ann;
+        let denom = (1.0 - sr * sr).sqrt();
         norm_cdf((sr - thr) * (t - 1.0).sqrt() / denom)
     };
     let dsr = psr(expected_max);
@@ -1248,8 +1260,8 @@ mod deflated_tests {
     fn the_selection_bar_rises_with_the_trial_count() {
         let few: Vec<f64> = (0..4).map(|i| 0.5 + i as f64 * 0.1).collect();
         let many: Vec<f64> = (0..40).map(|i| 0.5 + (i % 4) as f64 * 0.1).collect();
-        let a = deflated_sharpe(&few, 2000).unwrap();
-        let b = deflated_sharpe(&many, 2000).unwrap();
+        let a = deflated_sharpe(&few, 2000, 252.0).unwrap();
+        let b = deflated_sharpe(&many, 2000, 252.0).unwrap();
         assert!(
             b.expected_max_sharpe > a.expected_max_sharpe,
             "40 trials must set a higher bar than 4: {} vs {}",
@@ -1264,7 +1276,7 @@ mod deflated_tests {
     fn a_grid_of_noise_is_explained_by_selection() {
         // Trials scattered around zero — the "best" is just the luckiest.
         let noise: Vec<f64> = (0..32).map(|i| ((i % 7) as f64 - 3.0) * 0.15).collect();
-        let d = deflated_sharpe(&noise, 5000).unwrap();
+        let d = deflated_sharpe(&noise, 5000, 252.0).unwrap();
         assert!(d.selection_explains_it, "expected a selection verdict, got {d:?}");
         assert!(d.note.contains("no evidence"), "the note must say it plainly: {}", d.note);
     }
@@ -1274,7 +1286,7 @@ mod deflated_tests {
     fn a_standout_survives_the_correction() {
         let mut trials: Vec<f64> = vec![0.1, 0.12, 0.09, 0.11, 0.1, 0.08];
         trials.push(2.5);
-        let d = deflated_sharpe(&trials, 5000).unwrap();
+        let d = deflated_sharpe(&trials, 5000, 252.0).unwrap();
         assert!(!d.selection_explains_it, "a 2.5 against ~0.1 noise should clear the bar: {d:?}");
         assert!(d.deflated_sharpe > 0.5);
     }
@@ -1282,10 +1294,10 @@ mod deflated_tests {
     /// Degenerate inputs return None rather than a confident-looking zero.
     #[test]
     fn refuses_to_answer_without_data() {
-        assert!(deflated_sharpe(&[], 1000).is_none());
-        assert!(deflated_sharpe(&[1.0], 2).is_none());
+        assert!(deflated_sharpe(&[], 1000, 252.0).is_none());
+        assert!(deflated_sharpe(&[1.0], 2, 252.0).is_none());
         // A single trial has no selection to correct for: the bar stays at zero.
-        let one = deflated_sharpe(&[1.5], 1000).unwrap();
+        let one = deflated_sharpe(&[1.5], 1000, 252.0).unwrap();
         assert_eq!(one.expected_max_sharpe, 0.0);
         assert_eq!(one.trials, 1);
     }
@@ -1383,5 +1395,155 @@ mod tests {
         assert!(s.hour.is_empty()); // has_hour=false
         assert_eq!(s.month_weekday.len(), 12);
         assert_eq!(s.month_weekday[0].len(), 7);
+    }
+}
+
+/// Audit round 3 (2026-08-20): the multiple-testing correction's arithmetic.
+#[cfg(test)]
+mod verify_dsr {
+    use super::*;
+
+    /// norm_cdf must match known standard-normal values.
+    #[test]
+    fn vq_norm_cdf_known_values() {
+        let cases = [(0.0, 0.5), (1.0, 0.841_344_75), (-1.0, 0.158_655_25), (1.96, 0.975_002_1)];
+        for (x, want) in cases {
+            let got = norm_cdf(x);
+            assert!((got - want).abs() < 2e-7, "norm_cdf({x}): want {want}, got {got}");
+        }
+    }
+
+    /// norm_ppf must invert norm_cdf.
+    #[test]
+    fn vq_norm_ppf_inverts_cdf() {
+        for p in [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
+            let x = norm_ppf(p);
+            let back = norm_cdf(x);
+            assert!((back - p).abs() < 1e-6, "ppf/cdf roundtrip at {p}: got {back}");
+        }
+    }
+
+    /// The probabilistic Sharpe ratio must grow with the length of the track record: the same
+    /// annualized Sharpe observed over 10 years is far stronger evidence than over 6 months.
+    /// This is the entire purpose of PSR, so it must not be flat in `observations`.
+    #[test]
+    fn vq_psr_increases_with_track_record_length() {
+        // One trial, so expected_max = 0 and deflated_sharpe == probabilistic_sharpe:
+        // P(true Sharpe > 0) for an annualized Sharpe of 1.5.
+        let short = deflated_sharpe(&[1.5], 126, 252.0).expect("6 months");
+        let long = deflated_sharpe(&[1.5], 2520, 252.0).expect("10 years");
+        assert!(
+            long.probabilistic_sharpe > short.probabilistic_sharpe + 0.05,
+            "PSR must rise with sample size: 126 bars ⇒ {:.4}, 2520 bars ⇒ {:.4}",
+            short.probabilistic_sharpe,
+            long.probabilistic_sharpe
+        );
+    }
+
+    /// A Sharpe of 1.5 sustained over ten years of daily bars is overwhelming evidence of a
+    /// positive true Sharpe: PSR should be very close to 1.
+    #[test]
+    fn vq_psr_long_record_is_near_certain() {
+        let r = deflated_sharpe(&[1.5], 2520, 252.0).expect("10 years");
+        assert!(
+            r.probabilistic_sharpe > 0.99,
+            "Sharpe 1.5 over 2520 daily bars ⇒ PSR should be ~0.999, got {:.4}",
+            r.probabilistic_sharpe
+        );
+    }
+
+    /// Expected-max selection bar must grow with the number of trials: the best of 10_000 tries
+    /// is a higher bar than the best of 10.
+    #[test]
+    fn vq_expected_max_grows_with_trials() {
+        let sharpes_10: Vec<f64> = (0..10).map(|i| i as f64 * 0.1).collect();
+        let sharpes_10k: Vec<f64> = (0..10_000).map(|i| (i % 10) as f64 * 0.1).collect();
+        let a = deflated_sharpe(&sharpes_10, 252, 252.0).expect("10");
+        let b = deflated_sharpe(&sharpes_10k, 252, 252.0).expect("10k");
+        assert!(
+            b.expected_max_sharpe > a.expected_max_sharpe,
+            "selection bar must rise with N: 10 ⇒ {:.3}, 10k ⇒ {:.3}",
+            a.expected_max_sharpe,
+            b.expected_max_sharpe
+        );
+    }
+
+    /// A grid of pure noise must be flagged: the best trial should not clear the selection bar.
+    #[test]
+    fn vq_noise_grid_is_flagged() {
+        // Symmetric spread centred on zero — no edge anywhere in the grid.
+        let sharpes: Vec<f64> = (0..1000).map(|i| ((i as f64 / 999.0) - 0.5) * 2.0).collect();
+        let r = deflated_sharpe(&sharpes, 252, 252.0).expect("noise grid");
+        assert!(
+            r.selection_explains_it,
+            "a zero-centred noise grid must be flagged: best {:.3} vs bar {:.3}",
+            r.best_sharpe, r.expected_max_sharpe
+        );
+    }
+
+    /// A Sharpe at or above 1 per-observation is outside the model (`1 - sr^2` non-positive).
+    /// It must refuse to answer, not clamp into a confident-looking probability.
+    #[test]
+    fn vq_extreme_sharpe_probability_is_bounded() {
+        assert!(
+            deflated_sharpe(&[500.0], 10, 252.0).is_none(),
+            "an out-of-model Sharpe must yield None, not a clamped probability"
+        );
+        // An ordinary Sharpe still answers, and stays a probability.
+        let r = deflated_sharpe(&[1.2], 500, 252.0).expect("ordinary");
+        assert!((0.0..=1.0).contains(&r.probabilistic_sharpe), "psr {}", r.probabilistic_sharpe);
+        assert!((0.0..=1.0).contains(&r.deflated_sharpe), "dsr {}", r.deflated_sharpe);
+    }
+}
+
+#[cfg(test)]
+mod verify_dsr_fixed {
+    use super::*;
+
+    /// After the BUG-8 fix, PSR must track sample size the way the statistic is defined:
+    /// the same annualized Sharpe over a longer record is stronger evidence.
+    #[test]
+    fn vqf_psr_monotone_in_sample_size() {
+        let mut prev = 0.0;
+        for obs in [126usize, 252, 504, 1260, 2520] {
+            let r = deflated_sharpe(&[1.5], obs, 252.0).expect("psr");
+            assert!(
+                r.probabilistic_sharpe > prev,
+                "PSR must increase with observations: {obs} bars gave {:.4} after {prev:.4}",
+                r.probabilistic_sharpe
+            );
+            prev = r.probabilistic_sharpe;
+        }
+    }
+
+    /// Spot values against the closed form, computed independently in Python:
+    /// `ann = sqrt(252); sr = 1.5/ann; PSR(0) = Phi(sr * sqrt(t-1) / sqrt(1 - sr^2))`.
+    #[test]
+    fn vqf_psr_matches_closed_form() {
+        for (obs, want) in [(252usize, 0.933_677_f64), (2520, 0.999_999)] {
+            let r = deflated_sharpe(&[1.5], obs, 252.0).unwrap();
+            assert!(
+                (r.probabilistic_sharpe - want).abs() < 5e-4,
+                "{obs} bars: want {want}, got {}",
+                r.probabilistic_sharpe
+            );
+        }
+    }
+
+    /// The same annualized Sharpe over the same NUMBER of bars is weaker evidence when those
+    /// bars are hourly: 1000 hourly bars are ~3 months, 1000 daily bars are ~4 years, so the
+    /// per-bar Sharpe the estimate rests on is smaller. Before the fix `periods_per_year` was
+    /// not consulted at all and both answers were identical.
+    #[test]
+    fn vqf_timeframe_changes_the_verdict() {
+        let daily = deflated_sharpe(&[1.5], 1000, 252.0).unwrap();
+        let hourly = deflated_sharpe(&[1.5], 1000, 252.0 * 6.5).unwrap();
+        assert!(
+            hourly.probabilistic_sharpe < daily.probabilistic_sharpe,
+            "1000 hourly bars is far less evidence than 1000 daily bars; \
+             daily {:.4} vs hourly {:.4}",
+            daily.probabilistic_sharpe,
+            hourly.probabilistic_sharpe
+        );
     }
 }

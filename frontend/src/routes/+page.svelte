@@ -9,6 +9,7 @@
     makeWidgetRow,
     layoutForModules,
     normalizeDoc,
+    ensureModulesPage,
     pagesForDisplay,
     itemMinHeight,
     MODULES_PAGE_ID
@@ -47,10 +48,14 @@
   let cfgOpen = $state(false);
   let cfgItem = $state(null); // widget item being configured
 
-  // Full display list: built-in Modules page + user pages, default sorted first.
-  const display = $derived(doc ? pagesForDisplay(doc, installedList) : { pages: [], defaultId: null });
+  // Full display list: Modules page first, then user pages, default sorted first.
+  const display = $derived(
+    doc ? pagesForDisplay(doc, installedList, $t) : { pages: [], defaultId: null }
+  );
   const activePage = $derived(display.pages.find((p) => p.id === doc?.activePageId) ?? null);
   const layout = $derived(activePage?.layout ?? null);
+  // The Modules page is editable like the others; only its page settings (its module set
+  // is the installed set) and its deletion stay off limits.
   const isBuiltin = $derived(activePage?.id === MODULES_PAGE_ID);
   const isDefault = $derived(activePage != null && activePage.id === display.defaultId);
 
@@ -70,18 +75,21 @@
       .getLayout()
       .then((saved) => {
         doc = normalizeDoc(saved);
+        // Seed the Modules page on first sight, reconcile it with the installed set after.
+        if (ensureModulesPage(doc, installedList, $t)) save();
         openDefault();
       })
       .catch((e) => {
         loadError = e.message;
         doc = normalizeDoc(null);
+        ensureModulesPage(doc, installedList, $t);
         openDefault();
       });
   });
 
   // Point activePageId at the effective default (user default, else Modules page).
   function openDefault() {
-    const { defaultId } = pagesForDisplay(doc, installedList);
+    const { defaultId } = pagesForDisplay(doc, installedList, $t);
     doc.activePageId = defaultId;
   }
 
@@ -123,7 +131,7 @@
     modalOpen = true;
   }
   function openEditPage() {
-    if (isBuiltin) return; // built-in Modules page isn't editable
+    if (isBuiltin) return; // the Modules page's module set is the installed set
     // Edit the stored user-page object (not the display copy), so changes persist.
     modalPage = doc.pages.find((p) => p.id === activePage.id) ?? null;
     modalOpen = true;
@@ -171,7 +179,7 @@
   }
 
   function deleteActivePage() {
-    if (isBuiltin) return; // can't delete the built-in Modules page
+    if (isBuiltin) return; // the Modules page can't be deleted
     const id = activePage.id;
     if (doc.defaultPageId === id) doc.defaultPageId = null;
     doc.pages = doc.pages.filter((p) => p.id !== id);
@@ -273,10 +281,12 @@
   >
     {#snippet actions()}
       {#if activePage}
-        {#if editing && !isBuiltin}
-          <Button variant="ghost" size="sm" icon="settings" onclick={openEditPage}>
-            {$t('dashboard.editPage')}
-          </Button>
+        {#if editing}
+          {#if !isBuiltin}
+            <Button variant="ghost" size="sm" icon="settings" onclick={openEditPage}>
+              {$t('dashboard.editPage')}
+            </Button>
+          {/if}
           <Button variant="ghost" size="sm" icon="plus" onclick={addModuleRow}>
             {$t('dashboard.addRow')}
           </Button>
@@ -301,15 +311,9 @@
         >
           <Icon name="star" size={15} />
         </button>
-        {#if !isBuiltin}
-          <Button
-            variant={editing ? 'primary' : 'secondary'}
-            onclick={toggleEdit}
-            loading={saving}
-          >
-            {editing ? $t('dashboard.done') : $t('dashboard.edit')}
-          </Button>
-        {/if}
+        <Button variant={editing ? 'primary' : 'secondary'} onclick={toggleEdit} loading={saving}>
+          {editing ? $t('dashboard.done') : $t('dashboard.edit')}
+        </Button>
       {/if}
     {/snippet}
   </PageHeader>

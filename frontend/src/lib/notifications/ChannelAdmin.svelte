@@ -16,6 +16,7 @@
   import ErrorText from '$lib/ui/ErrorText.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import VaultPicker from '$lib/vault/VaultPicker.svelte';
+  import ConfigField from './ConfigField.svelte';
   import { modules as moduleRegistry } from '$lib/modules/registry.js';
   import { channelsApi, CHANNEL_KINDS, channelMeta, ALL_MODULES, isReady } from './api.js';
   import { t } from '$lib/i18n';
@@ -96,7 +97,11 @@
     addKind = kind;
     const meta = channelMeta(kind);
     addName = meta.label;
-    addConfig = Object.fromEntries(meta.fields.map((f) => [f.key, '']));
+    addConfig = Object.fromEntries(
+      meta.fields.flatMap((f) =>
+        f.vaultable ? [[f.key, ''], [`${f.key}_vault_item`, null]] : [[f.key, '']]
+      )
+    );
     // Opened from a module: grant that module only. Opened from settings: grant all.
     addModules = module ? [module] : [ALL_MODULES];
     addVault = null;
@@ -135,7 +140,13 @@
   $effect(() => {
     const c = selected;
     nameDraft = c?.name ?? '';
-    configDraft = { ...(c?.config ?? {}) };
+    // A stored config predates the vaultable fields, so seed the keys the form binds to.
+    const seeded = Object.fromEntries(
+      (channelMeta(c?.kind)?.fields ?? [])
+        .filter((f) => f.vaultable)
+        .map((f) => [`${f.key}_vault_item`, null])
+    );
+    configDraft = { ...seeded, ...(c?.config ?? {}) };
     secretDraft = null;
   });
   const selMeta = $derived(selected ? channelMeta(selected.kind) : null);
@@ -143,7 +154,10 @@
     !!selected &&
       (nameDraft.trim() !== selected.name ||
         (selMeta?.fields ?? []).some(
-          (f) => (configDraft[f.key] ?? '') !== (selected.config?.[f.key] ?? '')
+          (f) =>
+            (configDraft[f.key] ?? '') !== (selected.config?.[f.key] ?? '') ||
+            (configDraft[`${f.key}_vault_item`] ?? null) !==
+              (selected.config?.[`${f.key}_vault_item`] ?? null)
         ))
   );
 
@@ -299,15 +313,24 @@
           {#each addMeta.fields as f (f.key)}
             <label class="fld">
               <span>{f.label}{#if f.required}<em class="req">*</em>{/if}</span>
-              <input
-                type={f.type === 'number' ? 'number' : 'text'}
-                bind:value={addConfig[f.key]}
-                placeholder={f.placeholder ?? ''}
-              />
+              {#if f.vaultable}
+                <ConfigField
+                  bind:value={addConfig[f.key]}
+                  bind:vaultItem={addConfig[`${f.key}_vault_item`]}
+                  type={f.type === 'number' ? 'number' : 'text'}
+                  placeholder={f.placeholder ?? ''}
+                />
+              {:else}
+                <input
+                  type={f.type === 'number' ? 'number' : 'text'}
+                  bind:value={addConfig[f.key]}
+                  placeholder={f.placeholder ?? ''}
+                />
+              {/if}
             </label>
           {/each}
           <div class="fld">
-            {addMeta.secret.label}<em class="req">*</em>
+            <span>{addMeta.secret.label}<em class="req">*</em></span>
             <VaultPicker bind:vaultItemId={addVault} hasSecret={false} />
             {#if addMeta.secret.help}<small class="help">{addMeta.secret.help}</small>{/if}
           </div>
@@ -385,11 +408,20 @@
           {#each selMeta?.fields ?? [] as f (f.key)}
             <label class="fldrow">
               <span class="sname">{f.label}</span>
-              <input
-                type={f.type === 'number' ? 'number' : 'text'}
-                bind:value={configDraft[f.key]}
-                placeholder={f.placeholder ?? ''}
-              />
+              {#if f.vaultable}
+                <ConfigField
+                  bind:value={configDraft[f.key]}
+                  bind:vaultItem={configDraft[`${f.key}_vault_item`]}
+                  type={f.type === 'number' ? 'number' : 'text'}
+                  placeholder={f.placeholder ?? ''}
+                />
+              {:else}
+                <input
+                  type={f.type === 'number' ? 'number' : 'text'}
+                  bind:value={configDraft[f.key]}
+                  placeholder={f.placeholder ?? ''}
+                />
+              {/if}
             </label>
           {/each}
           <div class="formactions">

@@ -52,6 +52,8 @@ const ITEM_USE_SQL: &str = "(SELECT count(*) FROM feed_secrets WHERE vault_item_
      + (SELECT count(*) FROM agent_providers WHERE api_key_vault_item = vault_items.id) \
      + (SELECT count(*) FROM agent_mcp_servers WHERE auth_vault_item = vault_items.id) \
      + (SELECT count(*) FROM notif_channels WHERE secret_vault_item = vault_items.id) \
+     + (SELECT count(*) FROM notif_channels \
+        WHERE config::text LIKE '%' || vault_items.id::text || '%') \
      + (SELECT count(*) FROM mailbox_accounts WHERE vault_item_id = vault_items.id) \
      + (SELECT count(*) FROM mailbox_accounts WHERE refresh_vault_item = vault_items.id)";
 

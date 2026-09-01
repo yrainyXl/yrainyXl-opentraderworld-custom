@@ -46,6 +46,10 @@ pub struct Capability {
     pub adjusted: bool,
     /// Max bars one request returns; the worker pages in steps of this.
     pub max_bars_per_req: u32,
+    /// Minimum delay the worker leaves between two requests to this provider, in
+    /// milliseconds. Derived from `rate_limit` above: it keeps a long batch under the
+    /// published ceiling instead of tripping 429 and waiting out the penalty.
+    pub min_interval_ms: u64,
     /// Whether the connector can look symbols up (`search_symbols`). When false the UI
     /// falls back to free-text entry validated by the first fetch.
     pub searchable: bool,
@@ -273,18 +277,20 @@ pub fn parse_option_symbol(sym: &str) -> Result<OptionContract> {
     })
 }
 
-/// Helper: seconds in one canonical timeframe (used for paging windows).
+/// The timeframes the download pipeline supports. Deliberately a closed list: the arithmetic
+/// below would happily size a `2h` window that no provider mapping knows how to request.
+pub const SUPPORTED_TIMEFRAMES: [&str; 7] = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];
+
+/// Helper: seconds in one canonical timeframe (used for paging windows). The length itself
+/// comes from [`crate::timeframe::Timeframe`], which is the single source for timeframe
+/// arithmetic; this only guards the closed list above.
 pub fn timeframe_secs(tf: &str) -> Result<i64> {
-    Ok(match tf {
-        "1m" => 60,
-        "5m" => 300,
-        "15m" => 900,
-        "1h" => 3600,
-        "4h" => 14400,
-        "1d" => 86400,
-        "1w" => 604800,
-        other => return Err(anyhow!("unknown timeframe {other}")),
-    })
+    if !SUPPORTED_TIMEFRAMES.contains(&tf) {
+        return Err(anyhow!("unknown timeframe {tf}"));
+    }
+    crate::timeframe::Timeframe::parse(tf)?
+        .secs()
+        .ok_or_else(|| anyhow!("timeframe {tf} has no fixed length"))
 }
 
 #[cfg(test)]

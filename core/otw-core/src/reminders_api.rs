@@ -2,7 +2,7 @@
 //!
 //! Reminder CRUD plus the notifications surface: a `since`-based unread poll (drives the
 //! slide-in toast bandeau), an unread count (drives the topbar badge), the full list, and
-//! acknowledge/delete actions.
+//! acknowledge/clear/delete actions.
 
 use axum::{
     extract::{Path, Query, State},
@@ -21,7 +21,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/reminders", get(list).post(add))
         .route("/api/reminders/{id}", get(get_one).patch(update).delete(remove))
-        .route("/api/notifications", get(list_notifs))
+        .route("/api/notifications", get(list_notifs).delete(clear_all))
         .route("/api/notifications/unread", get(unread))
         .route("/api/notifications/ack-all", post(ack_all))
         .route("/api/notifications/{id}/read", post(mark_read))
@@ -167,6 +167,11 @@ async fn unread(
 async fn ack_all(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let cleared = reminders::mark_all_read(&state.pool).await?;
     Ok(Json(json!({ "cleared": cleared })))
+}
+
+async fn clear_all(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let removed = reminders::delete_all_notifications(&state.pool).await?;
+    Ok(Json(json!({ "removed": removed })))
 }
 
 async fn mark_read(

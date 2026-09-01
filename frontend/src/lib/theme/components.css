@@ -18,9 +18,15 @@
 }
 
 /* ── Text inputs / selects / textareas ──────────────────────────────────────
- * Element-level defaults: any bare control is already on-theme. */
+ * Element-level defaults: any bare control is already on-theme.
+ *
+ * The exclusions go through `:where()` on purpose, so this whole rule stays at
+ * element specificity (0,0,1). A component that puts a class on its input wins
+ * without a fight, which is what keeps a field nested in a bordered box (tag
+ * box, combo, input group) from drawing a second frame inside the first. Never
+ * raise the specificity here: a border inside a border is a bug in this app. */
 
-input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']),
+input:not(:where([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file'])),
 select,
 textarea {
   background: transparent;
@@ -43,7 +49,7 @@ input::placeholder,
 textarea::placeholder {
   color: var(--faint);
 }
-input:not([type='checkbox']):not([type='radio']):focus,
+input:not(:where([type='checkbox'], [type='radio'])):focus,
 select:focus,
 textarea:focus {
   outline: none;

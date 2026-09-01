@@ -77,7 +77,11 @@ export const CHANNEL_KINDS = [
     id: 'telegram',
     label: 'Telegram',
     secret: { key: 'token', label: 'Bot token', help: 'From @BotFather.' },
-    fields: [{ key: 'chat_id', label: 'Chat ID', placeholder: '123456789', required: true }]
+    // `vaultable`: the field may hold a vault item instead of a literal. The id is stored
+    // under `<key>_vault_item` and resolved server-side at send time.
+    fields: [
+      { key: 'chat_id', label: 'Chat ID', placeholder: '123456789', required: true, vaultable: true }
+    ]
   },
   {
     id: 'slack',

@@ -49,11 +49,14 @@ export const quantApi = {
       body: JSON.stringify({ dataset_id, side, entry, from, until })
     }),
 
-  /** Multi-asset: correlation, efficient frontier, risk parity. */
-  portfolio: (dataset_ids, { samples = 5000, risk_free = 0 } = {}) =>
+  /** Multi-asset: correlation, efficient frontier, risk parity.
+   *  `measure` picks the granularity the statistics are computed at: null/'auto' drops a
+   *  basket mixing a 24/7 market with an exchange one to weekly, 'stored' forces the
+   *  datasets' own timeframe, or name one ('1w'). */
+  portfolio: (dataset_ids, { samples = 5000, risk_free = 0, measure = null } = {}) =>
     req('/quant/portfolio', {
       method: 'POST',
-      body: JSON.stringify({ dataset_ids, samples, risk_free })
+      body: JSON.stringify({ dataset_ids, samples, risk_free, ...(measure ? { measure } : {}) })
     }),
 
   /** Seasonality heatmaps (month/weekday/hour) of one dataset's period returns.

@@ -221,7 +221,7 @@ async fn agent_token(pool: &PgPool) -> anyhow::Result<()> {
             .collect(),
     );
     let (row, _plaintext_discarded) =
-        otw_store::mcp::create_token(pool, "Demo agent (internal, read-only)", &perms).await?;
+        otw_store::mcp::create_token(pool, "Demo agent (internal, read-only)", &perms, None).await?;
     sqlx::query("UPDATE agent_agents SET mcp_token_id = $1 WHERE is_default")
         .bind(row.id)
         .execute(pool)
@@ -246,6 +246,14 @@ const STATEMENTS: &[&str] = &[
         '[\"VWAP fade\", \"RSI extreme\"]'::jsonb, 1)",
     "INSERT INTO journal_fee_schedules (id, name, amount, amount_kind, per, currency, position)
      VALUES (gen_random_uuid(), 'Broker flat', 1.5, 'fixed', 'trade', 'USD', 0)",
+    // Discipline tags: a short list of things this demo trader actually does, so the
+    // analytics screen has a real cost-of-mistakes figure instead of an empty panel.
+    "INSERT INTO journal_tags (id, name, kind, description, position) VALUES
+       (gen_random_uuid(), 'Moved my stop', 'mistake', 'Widened the stop once it was hit', 0),
+       (gen_random_uuid(), 'Exited early', 'mistake', 'Closed before the plan said to', 1),
+       (gen_random_uuid(), 'Overtraded', 'mistake', 'Took a trade with no edge, out of boredom', 2),
+       (gen_random_uuid(), 'Followed the plan', 'rule', 'Entry, stop and exit as written', 3),
+       (gen_random_uuid(), 'Breakout continuation', 'setup', 'Second push after a clean range break', 4)",
     // ── Prompt store: prompts + their version-1 history rows ─────────────────
     "WITH new_prompts AS (
          INSERT INTO prompt_store_prompts (id, name, body, tags, vote)
@@ -553,23 +561,25 @@ const STATEMENTS: &[&str] = &[
 /// A spread of closed trades over the last two months — enough for the breakdown,
 /// calendar and equity curve to look alive.
 async fn trades(pool: &PgPool) -> anyhow::Result<()> {
-    // (ticker, class, side, days_ago_entry, days_held, entry, exit, qty, fees, currency, strategy, signal, feedback)
-    let trades: &[(&str, &str, &str, i32, i32, f64, f64, f64, f64, &str, &str, &str, &str)] = &[
-        ("AAPL", "stock", "long", 55, 3, 227.40, 234.10, 20.0, 1.5, "USD", "Breakout", "Range break", "Clean setup, took profit at resistance."),
-        ("NVDA", "stock", "long", 48, 5, 168.20, 176.90, 15.0, 1.5, "USD", "Breakout", "Volume surge", "Strong momentum; exited a bit early."),
-        ("TSLA", "stock", "short", 41, 2, 322.50, 314.80, 10.0, 1.5, "USD", "Mean reversion", "RSI extreme", "Faded the gap-up; worked as planned."),
-        ("MSFT", "stock", "long", 34, 6, 502.10, 497.30, 8.0, 1.5, "USD", "Breakout", "Range break", "False break — cut it at the stop."),
-        ("BTC-USD", "crypto", "long", 28, 4, 104200.0, 109800.0, 0.15, 12.0, "USD", "Breakout", "Volume surge", "Held through the chop, good exit."),
-        ("ETH-USD", "crypto", "long", 21, 3, 3320.0, 3145.0, 2.0, 8.0, "USD", "Mean reversion", "VWAP fade", "Fought the trend — lesson logged."),
-        ("AIR.PA", "stock", "long", 14, 7, 172.60, 181.20, 25.0, 4.0, "EUR", "Breakout", "Range break", "Patience paid; textbook continuation."),
-        ("SPY", "etf", "short", 7, 1, 623.40, 619.90, 12.0, 1.5, "USD", "Mean reversion", "RSI extreme", "Quick scalp into the close."),
+    // (ticker, class, side, days_ago_entry, days_held, entry, exit, qty, fees, currency,
+    //  strategy, signal, feedback, planned stop, tags)
+    // The stop is what makes the R-multiples real; the tags are what price the mistakes.
+    let trades: &[(&str, &str, &str, i32, i32, f64, f64, f64, f64, &str, &str, &str, &str, f64, &str)] = &[
+        ("AAPL", "stock", "long", 55, 3, 227.40, 234.10, 20.0, 1.5, "USD", "Breakout", "Range break", "Clean setup, took profit at resistance.", 224.00, "Followed the plan"),
+        ("NVDA", "stock", "long", 48, 5, 168.20, 176.90, 15.0, 1.5, "USD", "Breakout", "Volume surge", "Strong momentum; exited a bit early.", 164.50, "Exited early"),
+        ("TSLA", "stock", "short", 41, 2, 322.50, 314.80, 10.0, 1.5, "USD", "Mean reversion", "RSI extreme", "Faded the gap-up; worked as planned.", 328.00, "Followed the plan"),
+        ("MSFT", "stock", "long", 34, 6, 502.10, 497.30, 8.0, 1.5, "USD", "Breakout", "Range break", "False break, cut it at the stop.", 497.00, "Followed the plan"),
+        ("BTC-USD", "crypto", "long", 28, 4, 104200.0, 109800.0, 0.15, 12.0, "USD", "Breakout", "Volume surge", "Held through the chop, good exit.", 101500.0, "Followed the plan,Breakout continuation"),
+        ("ETH-USD", "crypto", "long", 21, 3, 3320.0, 3145.0, 2.0, 8.0, "USD", "Mean reversion", "VWAP fade", "Fought the trend, lesson logged.", 3250.0, "Moved my stop"),
+        ("AIR.PA", "stock", "long", 14, 7, 172.60, 181.20, 25.0, 4.0, "EUR", "Breakout", "Range break", "Patience paid; textbook continuation.", 168.90, "Followed the plan,Breakout continuation"),
+        ("SPY", "etf", "short", 7, 1, 623.40, 619.90, 12.0, 1.5, "USD", "Mean reversion", "RSI extreme", "Quick scalp into the close.", 626.00, "Overtraded"),
     ];
     for t in trades {
         sqlx::query(
             "INSERT INTO journal_trades
                (id, category_id, strategy_id, ticker, asset_class, side,
                 entry_at, exit_at, entry_price, exit_price, quantity, fees, currency,
-                signal_name, feedback)
+                signal_name, feedback, stop_price)
              SELECT gen_random_uuid(),
                     CASE WHEN $2 = 'crypto' THEN (SELECT id FROM journal_categories WHERE name = 'Crypto')
                          ELSE (SELECT id FROM journal_categories WHERE is_default) END,
@@ -577,7 +587,7 @@ async fn trades(pool: &PgPool) -> anyhow::Result<()> {
                     $1, $2, $3,
                     now() - make_interval(days => $4),
                     now() - make_interval(days => $4 - $5),
-                    $6, $7, $8, $9, $11, $12, $13",
+                    $6, $7, $8, $9, $11, $12, $13, $14",
         )
         .bind(t.0)  // $1 ticker
         .bind(t.1)  // $2 asset_class
@@ -592,8 +602,24 @@ async fn trades(pool: &PgPool) -> anyhow::Result<()> {
         .bind(t.9)  // $11 currency
         .bind(t.11) // $12 signal_name
         .bind(t.12) // $13 feedback
+        .bind(t.13) // $14 stop_price
         .execute(pool)
         .await?;
+        if !t.14.is_empty() {
+            // Tickers are unique inside the seed, so matching on one is enough to
+            // attach the trade's tags without threading the generated id back out.
+            sqlx::query(
+                "INSERT INTO journal_trade_tags (trade_id, tag_id)
+                 SELECT tr.id, tg.id FROM journal_trades tr
+                 JOIN journal_tags tg ON tg.name = ANY(string_to_array($2, ','))
+                 WHERE tr.ticker = $1
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(t.0)
+            .bind(t.14)
+            .execute(pool)
+            .await?;
+        }
     }
     Ok(())
 }

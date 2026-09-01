@@ -12,15 +12,15 @@
 services:
   caddy:
     build: !reset null
-    image: opentraderworld/otw-caddy:0.0.8
+    image: opentraderworld/otw-caddy:0.0.9
     pull_policy: missing
 
   frontend:
     build: !reset null
-    image: opentraderworld/otw-frontend:0.0.8
+    image: opentraderworld/otw-frontend:0.0.9
     pull_policy: missing
 
   core:
     build: !reset null
-    image: opentraderworld/otw-core:0.0.8
+    image: opentraderworld/otw-core:0.0.9
     pull_policy: missing

@@ -2,18 +2,19 @@
   import Icon from '$lib/ui/Icon.svelte';
   // Performance breakdown for the selected category (or all), further filterable by
   // side, ticker, strategy, signal, and date range. Equity curve + stat grid.
-  import { journalApi, fmtMoney, fmtSignedMoney, fmtPct, fmtNum, ASSET_CLASSES } from './api.js';
+  import { journalApi, fmtMoney, fmtSignedMoney, fmtPct, fmtNum } from './api.js';
   import EquityChart from './EquityChart.svelte';
+  import FilterBar from './FilterBar.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { t } from '$lib/i18n';
-  import Dropdown from '$lib/ui/Dropdown.svelte';
 
   // categoryId: '' means aggregate across all categories.
   let {
     categoryId = '',
     category = null, // the current category object (null when scope is "all")
     strategies = [],
+    tags = [],
     suggestions = { tickers: [], exchanges: [], signals: [] },
     displayCurrency = 'USD',
     oncategoryChanged = () => {}
@@ -71,62 +72,11 @@
   const signedMoney = (n) => fmtSignedMoney(n, displayCurrency);
   const signedPct = (n) => (n == null ? '—' : `${n > 0 ? '+' : n < 0 ? '−' : ''}${Math.abs(n).toFixed(2)}%`);
 
-  // Trade-level filters layered on top of the category scope.
-  let fSide = $state('');
-  let fTicker = $state('');
-  let fStrategy = $state('');
-  let fSignal = $state('');
-  let fAsset = $state('');
-  let fSince = $state(''); // yyyy-mm-dd (date input)
-  let fUntil = $state('');
-
-  // Persist the filter bar across refreshes (per browser).
-  const FILTERS_KEY = 'otw.journal.breakdown.filters.v1';
-  let filtersLoaded = $state(false);
-  (function loadFilters() {
-    try {
-      const p = JSON.parse(localStorage.getItem(FILTERS_KEY) || '{}');
-      if (['', 'long', 'short'].includes(p.fSide)) fSide = p.fSide;
-      if (typeof p.fTicker === 'string') fTicker = p.fTicker;
-      if (typeof p.fStrategy === 'string') fStrategy = p.fStrategy;
-      if (typeof p.fSignal === 'string') fSignal = p.fSignal;
-      if (typeof p.fAsset === 'string') fAsset = p.fAsset;
-      if (typeof p.fSince === 'string') fSince = p.fSince;
-      if (typeof p.fUntil === 'string') fUntil = p.fUntil;
-    } catch {
-      /* corrupt — ignore */
-    }
-    filtersLoaded = true;
-  })();
-
-  $effect(() => {
-    const snap = { fSide, fTicker, fStrategy, fSignal, fAsset, fSince, fUntil };
-    if (!filtersLoaded) return;
-    try {
-      localStorage.setItem(FILTERS_KEY, JSON.stringify(snap));
-    } catch {
-      /* non-fatal */
-    }
-  });
+  // The filter bar owns its own state and hands back the payload the API expects.
+  let filter = $state({});
 
   let bd = $state(null);
   let loading = $state(true);
-
-  // The active filter payload sent to the API; date inputs become RFC3339 day bounds.
-  const filter = $derived({
-    category_id: categoryId || undefined,
-    side: fSide,
-    ticker: fTicker,
-    strategy_id: fStrategy,
-    signal_name: fSignal,
-    asset_class: fAsset,
-    since: fSince ? new Date(fSince + 'T00:00:00').toISOString() : '',
-    until: fUntil ? new Date(fUntil + 'T23:59:59').toISOString() : ''
-  });
-
-  const activeFilterCount = $derived(
-    [fSide, fTicker, fStrategy, fSignal, fAsset, fSince, fUntil].filter(Boolean).length
-  );
 
   $effect(() => {
     // Re-fetch whenever the scope or any filter changes.
@@ -141,10 +91,6 @@
         loading = false;
       });
   });
-
-  function clearFilters() {
-    fSide = fTicker = fStrategy = fSignal = fAsset = fSince = fUntil = '';
-  }
 
   const stats = $derived(
     bd
@@ -167,7 +113,11 @@
             value: bd.win_rate == null ? '—' : fmtPct(bd.win_rate * 100)
           },
           { label: $t('journal.breakdown.stat.profitFactor'), value: fmtNum(bd.profit_factor) },
-          { label: $t('journal.breakdown.stat.sharpe'), value: fmtNum(bd.sharpe) },
+          {
+            label: $t('journal.breakdown.stat.sharpe'),
+            value: fmtNum(bd.sharpe),
+            sub: $t('journal.breakdown.stat.sharpeSub', { sortino: fmtNum(bd.sortino) })
+          },
           // Max drawdown is a magnitude, not a signed result — the label carries the sense.
           { label: $t('journal.breakdown.stat.maxDrawdown'), value: fmtPct(bd.max_drawdown), tone: -1 },
           // Row 3 — the cost of running it.
@@ -194,13 +144,6 @@
   // Empty metric value "—" renders in --faint (spec: .is-empty), not full-strength text.
   const isEmptyVal = (v) => v === '—' || v == null || v === '';
 </script>
-
-<datalist id="bd-tickers">
-  {#each suggestions.tickers as v}<option value={v}></option>{/each}
-</datalist>
-<datalist id="bd-signals">
-  {#each suggestions.signals as v}<option value={v}></option>{/each}
-</datalist>
 
 <div class="breakdown">
   {#if category}
@@ -229,47 +172,15 @@
     </section>
   {/if}
 
-  <section class="filter-bar">
-    <Dropdown
-      bind:value={fSide}
-      title={$t('journal.breakdown.filter.side')}
-      ariaLabel={$t('journal.breakdown.filter.side')}
-      options={[
-        { value: '', label: $t('journal.breakdown.filter.anySide') },
-        { value: 'long', label: $t('journal.side.long') },
-        { value: 'short', label: $t('journal.side.short') }
-      ]}
-    />
-    <input placeholder={$t('journal.breakdown.filter.ticker')} list="bd-tickers" autocomplete="off" bind:value={fTicker} />
-    <Dropdown
-      bind:value={fStrategy}
-      title={$t('journal.breakdown.filter.strategy')}
-      ariaLabel={$t('journal.breakdown.filter.strategy')}
-      options={[
-        { value: '', label: $t('journal.breakdown.filter.anyStrategy') },
-        ...strategies.map((s) => ({ value: s.id, label: s.name }))
-      ]}
-    />
-    <input placeholder={$t('journal.breakdown.filter.signal')} list="bd-signals" autocomplete="off" bind:value={fSignal} />
-    <Dropdown
-      bind:value={fAsset}
-      title={$t('journal.breakdown.filter.assetClass')}
-      ariaLabel={$t('journal.breakdown.filter.assetClass')}
-      options={[
-        { value: '', label: $t('journal.breakdown.filter.anyClass') },
-        ...ASSET_CLASSES.map((a) => ({ value: a.id, label: a.label }))
-      ]}
-    />
-    <label class="date">{$t('journal.breakdown.filter.from')} <input type="date" bind:value={fSince} /></label>
-    <label class="date">{$t('journal.breakdown.filter.to')} <input type="date" bind:value={fUntil} /></label>
-    {#if activeFilterCount > 0}
-      <div class="filter-clear">
-        <Button size="sm" icon="x" onclick={clearFilters}>
-          {$t('journal.breakdown.filter.clear', { count: activeFilterCount })}
-        </Button>
-      </div>
-    {/if}
-  </section>
+  <FilterBar
+    {categoryId}
+    {strategies}
+    {tags}
+    {suggestions}
+    storageKey="otw.journal.breakdown.filters.v1"
+    idPrefix="bd"
+    bind:value={filter}
+  />
 
   {#if loading && !bd}
     <!-- Hold the chart + stat-grid shape rather than collapsing to a line of text. -->
@@ -296,6 +207,7 @@
           <span class="stat-label">{s.label}</span>
           <!-- .num: figures line up across the grid even at different widths. -->
           <span class="stat-value num {toneClass(s.tone)}" class:is-empty={isEmptyVal(s.value)}>{s.value}</span>
+          {#if s.sub}<span class="stat-sub">{s.sub}</span>{/if}
         </div>
       {/each}
       <!-- Fill the last row with empty cells so the grid stays rectangular. -->
@@ -307,10 +219,6 @@
 </div>
 
 <style>
-  /* .filter-bar / .filter-clear come from theme/components.css (shared with Trades). */
-  .filter-bar input:not([type]) {
-    width: 110px;
-  }
   .breakdown {
     display: flex;
     flex-direction: column;
@@ -431,6 +339,11 @@
     letter-spacing: 0.06em;
     font-weight: var(--fw-normal);
     color: var(--dim);
+  }
+  .stat-sub {
+    font-size: 10.5px;
+    color: var(--faint);
+    line-height: var(--lh-tight);
   }
   .stat-value {
     font-family: var(--mono);

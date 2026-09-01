@@ -12,6 +12,8 @@
     computeFee,
     fmtMoney,
     fmtSignedMoney,
+    fmtPct,
+    journalApi,
     roundDp
   } from './api.js';
   import { uploadFile, pickFile } from '$lib/modules/editor/files-api.js';
@@ -26,6 +28,7 @@
     initial = null, // existing trade for edit, or null for new
     defaultCategoryId = '',
     suggestions = { tickers: [], exchanges: [], signals: [] }, // autocomplete from past trades
+    tags = [], // discipline tags (mistakes / rules / setups)
     onsubmit = () => {},
     oncancel = () => {}
   } = $props();
@@ -63,7 +66,11 @@
       cost_basis_method: 'avg',
       entries: [],
       exits: [],
-      brackets: []
+      brackets: [],
+      // The plan, not the result: the stop feeds the risk line below and the R-multiple
+      // the analytics screen reports.
+      stop_price: null,
+      tags: []
     };
     if (initial) {
       return {
@@ -78,7 +85,9 @@
         cost_basis_method: initial.cost_basis_method ?? 'avg',
         entries: (initial.entries ?? []).map(legToLocal),
         exits: (initial.exits ?? []).map(legToLocal),
-        brackets: (initial.brackets ?? []).map(legToLocal)
+        brackets: (initial.brackets ?? []).map(legToLocal),
+        stop_price: initial.stop_price ?? null,
+        tags: initial.tags ?? []
       };
     }
     return base;
@@ -160,6 +169,10 @@
   }
   function removeImage(i) {
     t.images = t.images.filter((_, idx) => idx !== i);
+  }
+
+  function toggleTag(id) {
+    t.tags = t.tags.includes(id) ? t.tags.filter((x) => x !== id) : [...t.tags, id];
   }
 
   function num(v) {
@@ -276,6 +289,74 @@
     return { avg, openQty: Math.max(entryQty - exitQty, 0), gross, net };
   });
 
+// ── Risk line ──
+  // One sentence, live, before the trade is committed: what the stop costs if it fills,
+  // and what share of the account's stack that is. The stack comes from the category's
+  // capital events; only events in the trade's own currency count toward the percentage,
+  // so a multi-currency book never quotes a converted number it hasn't converted.
+  let capitalEvents = $state([]);
+  $effect(() => {
+    const id = t.category_id;
+    if (!id) {
+      capitalEvents = [];
+      return;
+    }
+    let stale = false;
+    journalApi
+      .listCapital(id)
+      .then((e) => {
+        if (!stale) capitalEvents = e;
+      })
+      .catch(() => {
+        if (!stale) capitalEvents = [];
+      });
+    return () => {
+      stale = true;
+    };
+  });
+
+  const stack = $derived(
+    capitalEvents
+      .filter((e) => e.currency === t.currency)
+      .reduce((sum, e) => sum + (e.kind === 'withdrawal' ? -e.amount : e.amount), 0)
+  );
+
+  // The stop the risk is measured against: the explicit field, else the first SL bracket
+  // (advanced mode) — the same precedence the backend applies.
+  const planStop = $derived.by(() => {
+    const explicit = Number(t.stop_price);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    const sl = t.brackets.find((br) => br.kind === 'sl' && Number(br.price) > 0);
+    return sl ? Number(sl.price) : null;
+  });
+  // The first take-profit, when there is one: it turns the sentence into a ratio.
+  const planTarget = $derived.by(() => {
+    const tp = t.brackets.find((br) => br.kind === 'tp' && Number(br.price) > 0);
+    return tp ? Number(tp.price) : null;
+  });
+
+  const risk = $derived.by(() => {
+    const entry = preview?.avg;
+    const stop = planStop;
+    if (!entry || !stop) return null;
+    const qty = feeBasisQty;
+    const mult = Number(t.multiplier) || 1;
+    const amount = Math.abs(entry - stop) * qty * mult;
+    if (!(amount > 0)) return null;
+    // A stop on the wrong side of the entry is a typo, not a plan: say so instead of
+    // reporting a loss the trade cannot take.
+    const wrongSide = t.side === 'short' ? stop < entry : stop > entry;
+    const reward =
+      planTarget != null ? (Math.abs(planTarget - entry) * qty * mult) / amount : null;
+    return {
+      amount,
+      pct: stack > 0 ? (amount / stack) * 100 : null,
+      stack,
+      reward,
+      wrongSide
+    };
+  });
+
   function legPayload(l) {
     return {
       id: l.id,
@@ -329,7 +410,9 @@
       cost_basis_method: t.cost_basis_method,
       entries: t.advanced ? t.entries.map(legPayload) : [],
       exits: t.advanced ? t.exits.map(legPayload) : [],
-      brackets: t.advanced ? t.brackets.map(bracketPayload) : []
+      brackets: t.advanced ? t.brackets.map(bracketPayload) : [],
+      stop_price: price(t.stop_price),
+      tags: t.tags
     };
     // `onsubmit` hits the network. Awaiting it (and gating the button on `saving`)
     // is what stops a double-click from logging the trade twice.
@@ -670,6 +753,61 @@
     </div>
   {/if}
 
+  <!-- The plan and the discipline: what the trade risks, and which rules it honoured or
+       broke. Always shown — a template describes the trade's columns, not its plan. -->
+  <section class="plan">
+    <div class="plan-row">
+      <label class="field">
+        <span>{$tr('journal.tradeForm.stopPrice')}</span>
+        <input
+          type="number"
+          step="any"
+          bind:value={t.stop_price}
+          placeholder={$tr('journal.tradeForm.stopPlaceholder')}
+        />
+      </label>
+      {#if risk}
+        <p class="risk" class:wrong={risk.wrongSide}>
+          {#if risk.wrongSide}
+            {$tr('journal.tradeForm.risk.wrongSide', { side: $tr(`journal.side.${t.side}`) })}
+          {:else if risk.pct != null}
+            {$tr('journal.tradeForm.risk.withStack', {
+              amount: fmtMoney(risk.amount, t.currency),
+              pct: fmtPct(risk.pct),
+              stack: fmtMoney(risk.stack, t.currency)
+            })}
+          {:else}
+            {$tr('journal.tradeForm.risk.plain', { amount: fmtMoney(risk.amount, t.currency) })}
+          {/if}
+          {#if risk.reward != null && !risk.wrongSide}
+            <span class="reward">{$tr('journal.tradeForm.risk.reward', { r: risk.reward.toFixed(2) })}</span>
+          {/if}
+        </p>
+      {:else}
+        <p class="risk empty-hint">{$tr('journal.tradeForm.risk.none')}</p>
+      {/if}
+    </div>
+
+    {#if tags.length > 0}
+      <div class="field wide">
+        <span>{$tr('journal.tradeForm.tags')}</span>
+        <div class="chips">
+          {#each tags as tag (tag.id)}
+            <button
+              type="button"
+              class="chip {tag.kind}"
+              class:on={t.tags.includes(tag.id)}
+              title={tag.description ?? ''}
+              onclick={() => toggleTag(tag.id)}
+            >
+              {tag.name}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+  </section>
+
   {#if showReserved('feedback')}
     <label class="field wide"
       ><span>{$tr('journal.tradeForm.feedback')}</span><textarea bind:value={t.feedback}></textarea></label
@@ -710,6 +848,72 @@
 </form>
 
 <style>
+  /* Plan block: the stop, the sentence it produces, and the discipline chips. */
+  .plan {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    border-top: 0.5px solid var(--border);
+    padding-top: var(--space-4);
+  }
+  .plan-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4);
+  }
+  .plan-row .field {
+    max-width: 180px;
+  }
+  .risk {
+    flex: 1 1 240px;
+    font-size: var(--text-sm);
+    line-height: var(--lh-base);
+    color: var(--text);
+    padding-bottom: 6px;
+  }
+  .risk.empty-hint {
+    color: var(--faint);
+  }
+  .risk.wrong {
+    color: var(--amber);
+  }
+  .reward {
+    color: var(--dim);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  /* One frame per chip; the kind tints the border only once the chip is on, so an
+     unselected rail stays quiet. */
+  .chip {
+    background: transparent;
+    border: 0.5px solid var(--border);
+    color: var(--dim);
+    border-radius: 0;
+    padding: 3px var(--space-2);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .chip:hover {
+    color: var(--text);
+  }
+  .chip.on {
+    color: var(--text);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .chip.mistake.on {
+    border-color: var(--red);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+  }
+  .chip.rule.on {
+    border-color: var(--green);
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+  }
+
   .trade-form {
     display: flex;
     flex-direction: column;

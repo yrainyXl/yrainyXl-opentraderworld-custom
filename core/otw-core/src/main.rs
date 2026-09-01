@@ -6,9 +6,14 @@
 
 mod agent;
 mod agent_api;
+mod align;
+mod automator;
+mod automator_api;
+mod automator_job;
 mod auth;
 mod backtest;
 mod backtest_api;
+mod backtest_optimize_api;
 mod quant;
 mod quant_api;
 mod calendar_api;
@@ -36,6 +41,7 @@ mod histdata_api;
 mod histdata_cipher;
 mod histdata_job;
 mod import;
+mod internal_call;
 mod journal_api;
 mod journal_import;
 mod journal_import_api;
@@ -69,9 +75,11 @@ mod subscriptions_api;
 mod taxcalc;
 mod taxcalc_api;
 mod time_api;
+mod timeframe;
 mod todos_api;
 mod trader_tasks_api;
 mod vault_api;
+mod video_embed;
 mod watchlists;
 mod watchlists_api;
 mod wealth_api;
@@ -163,6 +171,9 @@ pub struct AppState {
     pub live: live::hub::LiveHub,
     /// In-memory rate limiter guarding the doc-submission relay.
     pub submit_limiter: community_docs_api::SubmitLimiter,
+    /// Backtest parameter grids: the last few optimization jobs, running or finished. In memory
+    /// on purpose — a sweep is an exploration, the run history is where a result is kept.
+    pub optimizer: std::sync::Arc<backtest::optimize::Jobs>,
 }
 
 #[tokio::main]
@@ -328,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         live,
         submit_limiter: community_docs_api::SubmitLimiter::new(),
+        optimizer: std::sync::Arc::new(backtest::optimize::Jobs::new()),
     };
 
     // Public routes: health and the auth handshake (setup + login). Everything else is
@@ -353,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(documents::routes())
         .merge(databases::routes())
         .merge(files::routes())
+        .merge(video_embed::routes())
         .merge(feeds_api::routes())
         .merge(journal_api::routes())
         .merge(journal_import_api::routes())
@@ -378,6 +391,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(connectors_api::routes())
         .merge(histdata_api::routes())
         .merge(backtest_api::routes())
+        .merge(backtest_optimize_api::routes())
         .merge(quant_api::routes())
         .merge(mportfolios_api::routes())
         .merge(portfolios_api::routes())
@@ -389,12 +403,17 @@ async fn main() -> anyhow::Result<()> {
         .merge(mcp_api::routes())
         .merge(agent_api::routes())
         .merge(webhooks_api::routes())
-        .merge(mailbox_api::routes());
+        .merge(mailbox_api::routes())
+        .merge(automator_api::routes());
 
     // MCP serves tool calls by running the same handlers in-process, minus the
     // session middleware (it authenticates with bearer tokens and injects the admin
     // user itself). Endpoint + permission checks live in `mcp`.
     mcp::init_dispatch(api.clone().with_state(state.clone()));
+
+    // The Automator dispatches into that same router, so its tick loop starts only once
+    // the router exists.
+    automator_job::spawn(state.clone());
 
     let protected =
         api.route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -612,6 +631,9 @@ impl ApiError {
     }
     pub fn conflict(m: &str) -> Self {
         Self { status: StatusCode::CONFLICT, message: m.into() }
+    }
+    pub fn forbidden(m: &str) -> Self {
+        Self { status: StatusCode::FORBIDDEN, message: m.into() }
     }
     pub fn not_found(m: &str) -> Self {
         Self { status: StatusCode::NOT_FOUND, message: m.into() }

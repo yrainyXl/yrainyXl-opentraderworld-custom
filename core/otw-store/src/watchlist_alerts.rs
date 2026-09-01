@@ -71,7 +71,7 @@ mod ts_opt {
 }
 
 /// Create/update payload. Validated in the API handler, not here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct AlertInput {
     pub metric: String,
     pub direction: String,

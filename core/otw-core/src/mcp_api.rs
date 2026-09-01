@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{mcp::catalog, ApiError, AppState};
@@ -78,6 +79,22 @@ fn validate_permissions(perms: &Value) -> Result<(), ApiError> {
 struct CreateToken {
     name: String,
     permissions: Value,
+    /// Days the token stays valid; absent or 0 = never expires.
+    #[serde(default)]
+    expires_in_days: Option<i64>,
+}
+
+/// Turn a "valid for N days" choice into an absolute instant. `None`/`Some(0)` = no expiry;
+/// the ceiling is ten years, which is not a security boundary, just a guard against a
+/// fat-fingered figure landing past the end of what the date type can hold.
+fn expiry_from_days(days: Option<i64>) -> Result<Option<OffsetDateTime>, ApiError> {
+    match days {
+        None | Some(0) => Ok(None),
+        Some(n) if (1..=3650).contains(&n) => {
+            Ok(Some(OffsetDateTime::now_utc() + Duration::days(n)))
+        }
+        Some(_) => Err(ApiError::bad_request("expires_in_days must be between 0 and 3650")),
+    }
 }
 
 async fn create_token(
@@ -89,7 +106,9 @@ async fn create_token(
         return Err(ApiError::bad_request("token name is required"));
     }
     validate_permissions(&input.permissions)?;
-    let (row, plaintext) = otw_store::mcp::create_token(&state.pool, name, &input.permissions).await?;
+    let expires_at = expiry_from_days(input.expires_in_days)?;
+    let (row, plaintext) =
+        otw_store::mcp::create_token(&state.pool, name, &input.permissions, expires_at).await?;
     tracing::info!("mcp token created: {name}");
     Ok(Json(json!({ "token": plaintext, "record": row })))
 }
@@ -98,6 +117,10 @@ async fn create_token(
 struct UpdateToken {
     name: Option<String>,
     permissions: Option<Value>,
+    /// Days from now the token should stay valid; 0 clears the expiry. Absent leaves it
+    /// as it is (that is why it is nested: `Some(None)` cannot mean "unchanged" here).
+    #[serde(default)]
+    expires_in_days: Option<i64>,
 }
 
 async fn update_token(
@@ -113,7 +136,7 @@ async fn update_token(
     if let Some(perms) = &input.permissions {
         validate_permissions(perms)?;
     }
-    let row = otw_store::mcp::update_token(
+    let mut row = otw_store::mcp::update_token(
         &state.pool,
         id,
         input.name.as_deref().map(str::trim),
@@ -121,6 +144,12 @@ async fn update_token(
     )
     .await?
     .ok_or_else(|| ApiError::not_found("token not found"))?;
+    if input.expires_in_days.is_some() {
+        let expires_at = expiry_from_days(input.expires_in_days)?;
+        if let Some(updated) = otw_store::mcp::set_expiry(&state.pool, id, expires_at).await? {
+            row = updated;
+        }
+    }
     Ok(Json(json!({ "record": row })))
 }
 

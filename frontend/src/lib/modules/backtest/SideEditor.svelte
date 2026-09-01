@@ -159,9 +159,9 @@
 <style>
   .side {
     --side-color: var(--green);
-    border: 1px solid var(--border);
-    border-left: 3px solid color-mix(in srgb, var(--side-color) 55%, transparent);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border);
+    border-left: 2px solid color-mix(in srgb, var(--side-color) 55%, transparent);
+    border-radius: 0;
     padding: var(--space-3);
     display: flex;
     flex-direction: column;
@@ -231,7 +231,7 @@
   .kind-seg {
     display: inline-flex;
     background: var(--surface-2);
-    border: 0.5px solid var(--border-control);
+    border: var(--hairline) solid var(--border-control);
     border-radius: 0;
     padding: 1px;
   }
@@ -265,9 +265,10 @@
   .unit {
     display: flex;
     align-items: center;
+    height: var(--control-h);
     background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border-control);
+    border-radius: 0;
     padding-right: var(--space-2);
     transition: border-color var(--dur-fast) var(--ease);
   }
@@ -277,6 +278,7 @@
   .unit input {
     flex: 1;
     min-width: 0;
+    height: 100%;
     border: none;
     background: transparent;
   }

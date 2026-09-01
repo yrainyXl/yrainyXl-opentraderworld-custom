@@ -5,11 +5,13 @@
   // Bound via $bindable so the parent's settings object updates directly.
   import { INDICATOR_GROUPS, PRICE_FIELDS, indicatorById } from '$lib/indicators/dag.js';
   import IndicatorPicker from '$lib/ui/IndicatorPicker.svelte';
+  import { METRICS, POSITION_FIELDS } from './api.js';
   import { t } from '$lib/i18n';
 
   // `customIndicators` (expert mode) = [{ id, name }] saved custom indicators that can be
   // referenced as an operand. Empty in normal mode, so the Custom optgroup is hidden.
-  let { operand = $bindable(), customIndicators = [] } = $props();
+  // `positions` adds the live-portfolio group, which only a DCA run can answer.
+  let { operand = $bindable(), customIndicators = [], positions = false } = $props();
 
   const selValue = $derived(
     operand.kind === 'price'
@@ -18,7 +20,11 @@
         ? 'const'
         : operand.kind === 'custom_indicator'
           ? `custom:${operand.id}`
-          : `ind:${operand.indicator}`
+          : operand.kind === 'metric'
+            ? `metric:${operand.metric}`
+            : operand.kind === 'position'
+              ? `pos:${operand.field}`
+              : `ind:${operand.indicator}`
   );
 
   // Switching selection reseeds the operand, keeping shared params / the const value.
@@ -29,6 +35,11 @@
       operand = { kind: 'price', field: v.slice(6) };
     } else if (v.startsWith('custom:')) {
       operand = { kind: 'custom_indicator', id: v.slice(7) };
+    } else if (v.startsWith('metric:')) {
+      const metric = v.slice(7);
+      operand = { kind: 'metric', metric, period: metric === 'change_pct' ? (operand.period ?? 20) : 0 };
+    } else if (v.startsWith('pos:')) {
+      operand = { kind: 'position', field: v.slice(4) };
     } else {
       const id = v.slice(4);
       const def = indicatorById(id);
@@ -50,6 +61,18 @@
       ? [{ label: $t('backtest.operand.custom'), items: customIndicators.map((ci) => ({ value: `custom:${ci.id}`, label: ci.name })) }]
       : []),
     { label: $t('backtest.operand.price'), items: PRICE_FIELDS.map((f) => ({ value: `price:${f}`, label: f })) },
+    {
+      label: $t('backtest.operand.metric'),
+      items: METRICS.map((m) => ({ value: `metric:${m.id}`, label: $t(`backtest.metric.${m.id}`) }))
+    },
+    ...(positions
+      ? [
+          {
+            label: $t('backtest.operand.position'),
+            items: POSITION_FIELDS.map((f) => ({ value: `pos:${f}`, label: $t(`backtest.posField.${f}`) }))
+          }
+        ]
+      : []),
     { label: $t('backtest.operand.fixed'), items: [{ value: 'const', label: $t('backtest.operand.valueEllipsis') }] }
   ]);
 </script>
@@ -66,6 +89,16 @@
 
   {#if operand.kind === 'const'}
     <input class="val" type="number" step="any" bind:value={operand.value} aria-label={$t('backtest.operand.value')} />
+  {:else if operand.kind === 'metric' && operand.metric === 'change_pct'}
+    <input
+      class="param"
+      type="number"
+      min="1"
+      step="1"
+      bind:value={operand.period}
+      title={$t('backtest.metric.periodBars')}
+      aria-label={$t('backtest.metric.periodBars')}
+    />
   {:else if indDef?.params?.length}
     {#each indDef.params as p (p.key)}
       <input
@@ -98,7 +131,7 @@
   }
   .val,
   .param {
-    height: 28px;
+    height: var(--control-h, 28px);
     font-size: var(--text-sm);
     background-color: var(--surface);
     text-align: center;

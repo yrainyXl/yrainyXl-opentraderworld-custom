@@ -2,10 +2,13 @@
   import Modal from '$lib/ui/Modal.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
+  import MultiSelect from '$lib/ui/MultiSelect.svelte';
   import UsagePie from './UsagePie.svelte';
-  // Download form: pick a connector → asset type → timeframe (greyed by capability matrix),
-  // enter ticker + date range, queue the job. No client-side ticker validation — a bad
+  // Download form: pick a connector → asset types → timeframes (greyed by capability matrix),
+  // enter ticker(s) + date range, queue the jobs. No client-side ticker validation — a bad
   // ticker surfaces as a job error (the server's validation policy).
+  // Batch: several timeframes and several comma-separated tickers queue one job per pair,
+  // all on the same connector and the same window (the server fans them out).
   import { histdataApi } from './api.js';
   import { t } from '$lib/i18n';
   import ErrorText from '$lib/ui/ErrorText.svelte';
@@ -18,7 +21,7 @@
 
   let connectorId = $state('');
   let assetType = $state('');
-  let timeframe = $state('');
+  let selTfs = $state([]); // one job per selected timeframe
   let ticker = $state('');
   // Option contract builder (shown when assetType === 'option'). We collect the parts every
   // broker asks for and compose the bare OCC symbol (UND + YYMMDD + C/P + strike*1000); each
@@ -38,6 +41,8 @@
   let error = $state('');
   let busy = $state(false);
   let showLimits = $state(false); // Yahoo range-limit warning modal
+  let showBatchInfo = $state(false); // (i) popover: how multi-timeframe / multi-ticker works
+  let infoRoot = $state(null);
 
   const conn = $derived(connectors.find((c) => c.id === connectorId) ?? null);
   const assetTypes = $derived(conn?.asset_types ?? []);
@@ -74,6 +79,7 @@
   }
   function onPickerDocClick(e) {
     if (pickerRoot && !pickerRoot.contains(e.target)) pickerOpen = false;
+    if (infoRoot && !infoRoot.contains(e.target)) showBatchInfo = false;
   }
   function quotaText(c) {
     if (!c.quota) return '';
@@ -101,15 +107,27 @@
     return `${und}${yymmdd}${optType}${strike8}`;
   });
 
-  // The symbol actually submitted: composed OCC for options, else the free-text ticker.
-  const effectiveTicker = $derived(isOption ? occSymbol : ticker.trim());
+  // The symbols actually submitted: the composed OCC contract for options (one at a time,
+  // the builder describes a single contract), else the comma-separated list.
+  const effectiveTickers = $derived.by(() => {
+    if (isOption) return occSymbol ? [occSymbol] : [];
+    const seen = new Set();
+    return ticker
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s && !seen.has(s) && seen.add(s));
+  });
 
   // Reset dependent fields when the connector changes / selection becomes invalid.
   $effect(() => {
     if (conn && !assetTypes.includes(assetType)) assetType = assetTypes[0] ?? '';
   });
+  // Drop timeframes the new connector doesn't serve; never leave the selection empty.
   $effect(() => {
-    if (conn && !timeframes.includes(timeframe)) timeframe = timeframes[0] ?? '';
+    if (!conn) return;
+    const kept = selTfs.filter((tf) => timeframes.includes(tf));
+    if (kept.length !== selTfs.length) selTfs = kept;
+    if (kept.length === 0 && timeframes.length) selTfs = [timeframes[0]];
   });
 
   // Date is required; time is optional and defaults to midnight.
@@ -118,35 +136,86 @@
     return new Date(`${date}T${time || '00:00'}`).toISOString();
   }
 
-  // Yahoo intraday limit for the current connector/timeframe, in days (null = no limit).
-  const yahooLimitDays = $derived(
-    conn?.provider === 'yahoo' ? (YAHOO_LIMITS[timeframe] ?? null) : null
+  // ── What the batch will cost ──
+  // The server prices the request (chunks per pair, the connector's spacing, the quota
+  // left) without queueing anything, so the count is the worker's own arithmetic rather
+  // than a guess made here. Debounced: the form is edited character by character.
+  let estimate = $state(null);
+
+  const estimateKey = $derived(
+    [connectorId, assetType, selTfs.join('|'), effectiveTickers.join('|'), fromDate, fromTime, toDate, toTime].join('~')
   );
-  // `from` older than the limit → the older portion can't be fetched.
-  const outsideLimit = $derived.by(() => {
-    if (!yahooLimitDays || !fromDate) return false;
+  $effect(() => {
+    void estimateKey;
+    if (!connectorId || !assetType || !selTfs.length || !effectiveTickers.length || !fromDate || !toDate) {
+      estimate = null;
+      return;
+    }
+    const payload = {
+      connector_id: connectorId,
+      asset_type: assetType,
+      ticker: effectiveTickers[0],
+      tickers: effectiveTickers.slice(1),
+      timeframe: selTfs[0],
+      timeframes: selTfs.slice(1),
+      from: localToRfc(fromDate, fromTime),
+      to: localToRfc(toDate, toTime)
+    };
+    let cancelled = false;
+    const id = setTimeout(() => {
+      histdataApi
+        .estimateDownload(payload)
+        .then((e) => {
+          if (!cancelled) estimate = e ?? null;
+        })
+        .catch(() => {
+          if (!cancelled) estimate = null; // a bad combination surfaces on submit, not here
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  });
+
+  /** "3 min" / "2 h 10" — the floor imposed by the provider's pacing. */
+  function human(secs) {
+    if (secs < 60) return `${Math.round(secs)} s`;
+    if (secs < 5400) return `${Math.round(secs / 60)} min`;
+    return `${Math.floor(secs / 3600)} h ${Math.round((secs % 3600) / 60)}`;
+  }
+
+  // Each selected timeframe carries its own intraday limit, so a batch is checked per
+  // timeframe: [{ tf, days }] for the ones whose window starts before what Yahoo serves.
+  const outside = $derived.by(() => {
+    if (conn?.provider !== 'yahoo' || !fromDate) return [];
     const earliest = new Date(localToRfc(fromDate, fromTime));
-    const cutoff = new Date(Date.now() - yahooLimitDays * 86400000);
-    return earliest < cutoff;
+    return selTfs
+      .map((tf) => ({ tf, days: YAHOO_LIMITS[tf] ?? null }))
+      .filter((o) => o.days && earliest < new Date(Date.now() - o.days * 86400000));
   });
 
   async function submit() {
     error = '';
-    if (!connectorId || !assetType || !timeframe || !effectiveTicker || !fromDate || !toDate) {
+    if (!connectorId || !assetType || !selTfs.length || !effectiveTickers.length || !fromDate || !toDate) {
       error = isOption ? $t('histdata.download.errOptionFields') : $t('histdata.download.errFillAll');
       return;
     }
-    if (outsideLimit) {
-      showLimits = true; // inform, don't queue a job that will fail
+    if (outside.length) {
+      showLimits = true; // inform, don't queue jobs that will fail
       return;
     }
     busy = true;
     try {
+      // Singular field + the rest as arrays: the server unions them, and a lone pair keeps
+      // the exact payload the endpoint has always accepted.
       await histdataApi.startDownload({
         connector_id: connectorId,
         asset_type: assetType,
-        ticker: effectiveTicker,
-        timeframe,
+        ticker: effectiveTickers[0],
+        tickers: effectiveTickers.slice(1),
+        timeframe: selTfs[0],
+        timeframes: selTfs.slice(1),
         from: localToRfc(fromDate, fromTime),
         to: localToRfc(toDate, toTime)
       });
@@ -245,12 +314,38 @@
       />
     </div>
     <div class="field sel">
-      <span class="lbl">{$t('histdata.download.timeframe')}</span>
-      <Dropdown
-        bind:value={timeframe}
+      <span class="lbl">
+        {$t('histdata.download.timeframe')}
+        <!-- One (i) for the whole batch behaviour: several timeframes here, several tickers
+             below, one job per pair. -->
+        <span class="infowrap" bind:this={infoRoot}>
+          <button
+            type="button"
+            class="infobtn"
+            class:on={showBatchInfo}
+            onclick={() => (showBatchInfo = !showBatchInfo)}
+            aria-label={$t('histdata.download.batchInfo.aria')}
+            aria-expanded={showBatchInfo}
+          >
+            <Icon name="info" size={13} />
+          </button>
+          {#if showBatchInfo}
+            <div class="infopop" role="dialog" aria-label={$t('histdata.download.batchInfo.aria')}>
+              <p class="ititle">{$t('histdata.download.batchInfo.title')}</p>
+              <p>{$t('histdata.download.batchInfo.timeframes')}</p>
+              <p>{$t('histdata.download.batchInfo.tickers')}</p>
+              <p>{$t('histdata.download.batchInfo.pairs')}</p>
+              <p>{$t('histdata.download.batchInfo.queue')}</p>
+            </div>
+          {/if}
+        </span>
+      </span>
+      <MultiSelect
+        bind:value={selTfs}
         options={timeframeOpts}
+        allLabel={$t('histdata.download.selectPlaceholder')}
         disabled={!conn}
-        ariaLabel={$t('histdata.download.timeframe')}
+        width="100%"
       />
     </div>
   </div>
@@ -292,6 +387,7 @@
           bind:value={ticker}
           placeholder={isFuture ? $t('histdata.download.futurePlaceholder') : $t('histdata.download.tickerPlaceholder')}
         />
+        <span class="hint">{$t('histdata.download.tickerMultiHint')}</span>
         {#if isFuture}<span class="hint">{$t('histdata.download.futureHint')}</span>{/if}
       </label>
     {/if}
@@ -320,15 +416,41 @@
       </button>
     </p>
   {/if}
-  {#if outsideLimit}
+  <!-- One line per offending timeframe: the limit is not the same for 1m and 1h. -->
+  {#each outside as o (o.tf)}
     <p class="warn">
-      {$t('histdata.download.outsideLimit', { timeframe, days: yahooLimitDays })}
+      {$t('histdata.download.outsideLimit', { timeframe: o.tf, days: o.days })}
       <button type="button" class="linkbtn" onclick={() => (showLimits = true)}>
         {$t('histdata.download.seeLimits')}
       </button>
     </p>
-  {/if}
+  {/each}
   <ErrorText error={error} copyable />
+
+  <!-- What this queues, before it is queued: jobs, provider requests, the floor the
+       pacing imposes, and whether the connector's quota can absorb it. -->
+  {#if estimate}
+    <p class="cost" class:over={estimate.over_quota}>
+      <Icon name={estimate.over_quota ? 'alert-triangle' : 'info'} size={13} />
+      <span>
+        {$t('histdata.download.costLine', {
+          jobs: estimate.jobs,
+          requests: estimate.requests,
+          time: human(estimate.seconds)
+        })}
+        {#if estimate.quota_max != null}
+          {$t('histdata.download.costQuota', {
+            used: estimate.quota_used,
+            max: estimate.quota_max,
+            period: $t(`common.period.${estimate.quota_period}`)
+          })}
+        {/if}
+        {#if estimate.over_quota}
+          {$t('histdata.download.costOverQuota')}
+        {/if}
+      </span>
+    </p>
+  {/if}
 
   <div class="actions">
     <button type="submit" disabled={busy || missingSecrets.length}>
@@ -344,12 +466,12 @@
   <table class="limits">
     <thead><tr><th>{$t('histdata.download.timeframe')}</th><th>{$t('histdata.download.maxLookback')}</th></tr></thead>
     <tbody>
-      <tr class:hi={timeframe === '1m'}><td>1m</td><td>{$t('histdata.download.lookback7d')}</td></tr>
-      <tr class:hi={timeframe === '5m'}><td>5m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
-      <tr class:hi={timeframe === '15m'}><td>15m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
-      <tr class:hi={timeframe === '30m'}><td>30m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
-      <tr class:hi={timeframe === '1h'}><td>1h</td><td>{$t('histdata.download.lookback730d')}</td></tr>
-      <tr class:hi={timeframe === '1d' || timeframe === '1w'}><td>1d / 1w</td><td>{$t('histdata.download.noLimit')}</td></tr>
+      <tr class:hi={selTfs.includes('1m')}><td>1m</td><td>{$t('histdata.download.lookback7d')}</td></tr>
+      <tr class:hi={selTfs.includes('5m')}><td>5m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
+      <tr class:hi={selTfs.includes('15m')}><td>15m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
+      <tr class:hi={selTfs.includes('30m')}><td>30m</td><td>{$t('histdata.download.lookback60d')}</td></tr>
+      <tr class:hi={selTfs.includes('1h')}><td>1h</td><td>{$t('histdata.download.lookback730d')}</td></tr>
+      <tr class:hi={selTfs.includes('1d') || selTfs.includes('1w')}><td>1d / 1w</td><td>{$t('histdata.download.noLimit')}</td></tr>
     </tbody>
   </table>
 </Modal>
@@ -381,6 +503,64 @@
      connector swaps one option set for another. */
   .field.sel {
     width: 140px;
+  }
+  /* The label carries the (i), so it is a flex row rather than plain text. */
+  .lbl {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  /* ── Batch (i) popover ── */
+  .infowrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .infobtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 0;
+    border-radius: var(--radius);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .infobtn:hover,
+  .infobtn.on {
+    color: var(--text);
+  }
+  .infopop {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    left: 0;
+    z-index: var(--z-dropdown);
+    width: 320px;
+    max-width: min(320px, calc(100vw - var(--space-4)));
+    padding: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+    font-size: var(--text-sm);
+    color: var(--muted);
+    text-align: left;
+    white-space: normal;
+    line-height: 1.5;
+    cursor: default;
+  }
+  .infopop p {
+    margin: 0 0 var(--space-2);
+  }
+  .infopop p:last-child {
+    margin-bottom: 0;
+  }
+  .infopop .ititle {
+    color: var(--text);
+    font-weight: var(--fw-medium);
+    margin-bottom: var(--space-1);
   }
 
   /* ── Connector picker ── */
@@ -546,6 +726,23 @@
   .warn {
     color: var(--amber);
     font-size: var(--text-base);
+  }
+  /* Cost preview: quiet by default, amber once the batch outruns the quota. */
+  .cost {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+  .cost.over {
+    color: var(--amber);
+  }
+  .cost :global(svg) {
+    flex: none;
+    margin-top: 2px;
   }
   .linkbtn {
     background: none;

@@ -338,7 +338,15 @@
           <div class="head">
             <span class="title">{port.labels.join(' · ')}</span>
             <span class="sub">{$t('quant.page.alignedPeriodsCount', { count: fmtNum(port.periods, 0) })}</span>
+            {#if port.measured_at}
+              <span class="sub">{$t('quant.page.measuredAt', { tf: port.measured_at })}</span>
+            {/if}
           </div>
+          {#if port.resampled}
+            <p class="muted small">
+              {$t('quant.page.resampled', { from: port.resampled.from, to: port.resampled.to })}
+            </p>
+          {/if}
 
           <section class="block">
             <h3>{$t('quant.page.correlationMatrix')}</h3>

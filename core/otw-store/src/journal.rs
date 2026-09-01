@@ -710,6 +710,12 @@ pub struct Trade {
     pub exits: JsonValue,
     pub brackets: JsonValue,
 
+    /// Planned stop for a simple trade (advanced trades carry SL brackets instead).
+    /// Feeds the risk-per-trade figure and the R-multiple.
+    pub stop_price: Option<f64>,
+    /// Ids of the tags attached to this trade. Filled by the list/get read path.
+    pub tags: Vec<Uuid>,
+
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 
@@ -792,13 +798,14 @@ struct TradeRow {
     entries: JsonValue,
     exits: JsonValue,
     brackets: JsonValue,
+    stop_price: Option<f64>,
     created_at: OffsetDateTime,
 }
 
 const TRADE_COLUMNS: &str = "id, category_id, template_id, strategy_id, ticker, asset_class, \
     exchange, side, currency, unit_type, fee_schedule_id, entry_at, exit_at, entry_price, \
     exit_price, quantity, fees, leverage, multiplier, signal_name, feedback, images, fields, \
-    advanced, cost_basis_method, entries, exits, brackets, created_at";
+    advanced, cost_basis_method, entries, exits, brackets, stop_price, created_at";
 
 fn row_to_trade(r: TradeRow) -> Trade {
     // Normalize to entry/exit legs: advanced trades use the JSON arrays; simple trades
@@ -865,6 +872,8 @@ fn row_to_trade(r: TradeRow) -> Trade {
         entries: r.entries,
         exits: r.exits,
         brackets: r.brackets,
+        stop_price: r.stop_price,
+        tags: Vec::new(),
         created_at: r.created_at,
         gross_pnl: pnl.gross,
         net_pnl: pnl.net,
@@ -1148,6 +1157,11 @@ pub struct TradeInput {
     pub exits: Vec<Leg>,
     #[serde(default)]
     pub brackets: Vec<Bracket>,
+    /// Planned stop for a simple trade; advanced trades take theirs from an SL bracket.
+    pub stop_price: Option<f64>,
+    /// Tag ids to attach to the trade (replaces the existing set on update).
+    #[serde(default)]
+    pub tags: Vec<Uuid>,
 }
 
 fn default_cost_basis() -> String {
@@ -1240,6 +1254,8 @@ pub struct TradeFilter {
     pub ticker: Option<String>,
     /// Case-insensitive exact signal-name match (trimmed).
     pub signal_name: Option<String>,
+    /// Only trades carrying this tag.
+    pub tag_id: Option<Uuid>,
     /// Date range on the trade's effective date (exit_at, else entry_at, else created_at).
     pub since: Option<OffsetDateTime>,
     pub until: Option<OffsetDateTime>,
@@ -1255,8 +1271,11 @@ pub async fn list_trades(pool: &PgPool, filter: &TradeFilter) -> anyhow::Result<
            AND ($4::text IS NULL OR side = $4) \
            AND ($5::text IS NULL OR lower(ticker) = lower($5)) \
            AND ($6::text IS NULL OR lower(signal_name) = lower($6)) \
-           AND ($7::timestamptz IS NULL OR COALESCE(exit_at, entry_at, created_at) >= $7) \
-           AND ($8::timestamptz IS NULL OR COALESCE(exit_at, entry_at, created_at) <= $8) \
+           AND ($7::uuid IS NULL OR EXISTS ( \
+                 SELECT 1 FROM journal_trade_tags tt \
+                 WHERE tt.trade_id = journal_trades.id AND tt.tag_id = $7)) \
+           AND ($8::timestamptz IS NULL OR COALESCE(exit_at, entry_at, created_at) >= $8) \
+           AND ($9::timestamptz IS NULL OR COALESCE(exit_at, entry_at, created_at) <= $9) \
          ORDER BY COALESCE(exit_at, entry_at, created_at) DESC, created_at DESC"
     );
     let rows = sqlx::query_as::<_, TradeRow>(AssertSqlSafe(sql))
@@ -1272,12 +1291,15 @@ pub async fn list_trades(pool: &PgPool, filter: &TradeFilter) -> anyhow::Result<
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
         )
+        .bind(filter.tag_id)
         .bind(filter.since)
         .bind(filter.until)
         .fetch_all(pool)
         .await
         .context("listing trades")?;
-    Ok(rows.into_iter().map(row_to_trade).collect())
+    let mut trades: Vec<Trade> = rows.into_iter().map(row_to_trade).collect();
+    crate::journal_analytics::hydrate_tags(pool, &mut trades).await?;
+    Ok(trades)
 }
 
 pub async fn get_trade(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>> {
@@ -1287,7 +1309,9 @@ pub async fn get_trade(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Trade>>
         .fetch_optional(pool)
         .await
         .context("fetching trade")?;
-    Ok(row.map(row_to_trade))
+    let mut trades: Vec<Trade> = row.map(row_to_trade).into_iter().collect();
+    crate::journal_analytics::hydrate_tags(pool, &mut trades).await?;
+    Ok(trades.pop())
 }
 
 /// Serialize the typed leg vectors to JSONB for storage (infallible for these types).
@@ -1302,9 +1326,9 @@ pub async fn add_trade(pool: &PgPool, input: &TradeInput) -> anyhow::Result<Trad
             (id, category_id, template_id, strategy_id, ticker, asset_class, exchange, side, \
              currency, unit_type, fee_schedule_id, entry_at, exit_at, entry_price, exit_price, \
              quantity, fees, leverage, multiplier, signal_name, feedback, images, fields, \
-             advanced, cost_basis_method, entries, exits, brackets) \
+             advanced, cost_basis_method, entries, exits, brackets, stop_price) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,\
-             $21,$22,$23,$24,$25,$26,$27,$28)",
+             $21,$22,$23,$24,$25,$26,$27,$28,$29)",
     )
     .bind(id)
     .bind(input.category_id)
@@ -1334,9 +1358,11 @@ pub async fn add_trade(pool: &PgPool, input: &TradeInput) -> anyhow::Result<Trad
     .bind(legs_json(&input.entries))
     .bind(legs_json(&input.exits))
     .bind(legs_json(&input.brackets))
+    .bind(input.stop_price)
     .execute(pool)
     .await
     .context("inserting trade")?;
+    crate::journal_analytics::set_trade_tags(pool, id, &input.tags).await?;
     get_trade(pool, id)
         .await?
         .context("trade vanished after insert")
@@ -1350,7 +1376,7 @@ pub async fn update_trade(pool: &PgPool, id: Uuid, input: &TradeInput) -> anyhow
             entry_at = $12, exit_at = $13, entry_price = $14, exit_price = $15, quantity = $16, \
             fees = $17, leverage = $18, multiplier = $19, signal_name = $20, feedback = $21, \
             images = $22, fields = $23, advanced = $24, cost_basis_method = $25, entries = $26, \
-            exits = $27, brackets = $28, updated_at = now() \
+            exits = $27, brackets = $28, stop_price = $29, updated_at = now() \
          WHERE id = $1",
     )
     .bind(id)
@@ -1381,10 +1407,15 @@ pub async fn update_trade(pool: &PgPool, id: Uuid, input: &TradeInput) -> anyhow
     .bind(legs_json(&input.entries))
     .bind(legs_json(&input.exits))
     .bind(legs_json(&input.brackets))
+    .bind(input.stop_price)
     .execute(pool)
     .await
     .context("updating trade")?;
-    Ok(res.rows_affected() > 0)
+    if res.rows_affected() == 0 {
+        return Ok(false);
+    }
+    crate::journal_analytics::set_trade_tags(pool, id, &input.tags).await?;
+    Ok(true)
 }
 
 pub async fn delete_trade(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
@@ -1483,8 +1514,11 @@ pub struct Breakdown {
     pub avg_loss: Option<f64>,
     pub profit_factor: Option<f64>,
     pub expectancy: Option<f64>,
-    /// Sharpe over per-trade returns (relative to invested capital), unannualized.
+    /// Sharpe over daily returns, annualized. Same definition as the analytics view
+    /// (`daily_ratios`), so the two screens never disagree.
     pub sharpe: Option<f64>,
+    /// Sortino over the same daily returns, annualized.
+    pub sortino: Option<f64>,
     pub max_drawdown: Option<f64>,
     pub best_trade: Option<f64>,
     pub worst_trade: Option<f64>,
@@ -1502,6 +1536,45 @@ pub struct Breakdown {
     /// Closed trades excluded from the totals because their FX rate was unavailable for
     /// the trade's date. Their dates are queued as pending tasks for the user to fill in.
     pub unconverted_trades: i64,
+}
+
+/// Sharpe and Sortino over **daily** returns, annualized (x sqrt(252)).
+///
+/// One definition for the whole journal: the breakdown and the analytics view must not
+/// disagree about what "Sharpe" means. Days are the unit (a per-trade ratio is not
+/// annualizable without inventing a trade frequency), and each day's return is measured
+/// against the equity the account actually carried into that day, so an early good day on
+/// a small account is not flattened by a larger account later.
+///
+/// `days` is the per-day net PnL in date order. Sortino divides by the RMS of the negative
+/// days over *all* days, so a run of flat days does not flatter the ratio.
+pub fn daily_ratios(days: &[(time::Date, f64)], invested_capital: f64) -> (Option<f64>, Option<f64>) {
+    const ANNUAL: f64 = 252.0;
+
+    let mut returns: Vec<f64> = Vec::with_capacity(days.len());
+    let mut equity = invested_capital;
+    for (_, net) in days {
+        if equity > 0.0 {
+            returns.push(net / equity);
+        }
+        equity += net;
+    }
+    if returns.len() < 2 {
+        return (None, None);
+    }
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let var =
+        returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() as f64 - 1.0);
+    let sd = var.sqrt();
+    let sharpe = (sd > 0.0).then(|| mean / sd * ANNUAL.sqrt());
+
+    let downside = (returns.iter().map(|r| r.min(0.0).powi(2)).sum::<f64>()
+        / returns.len() as f64)
+        .sqrt();
+    let sortino = (downside > 0.0).then(|| mean / downside * ANNUAL.sqrt());
+
+    (sharpe, sortino)
 }
 
 /// Margin tied up by a trade while it is held: notional (|entry| * qty * multiplier)
@@ -1643,7 +1716,9 @@ pub async fn breakdown(
     let open_count = trade_count - closed_count - unconverted_trades;
 
     let pnls: Vec<f64> = closed.iter().map(|c| c.net).collect();
-    let realized_pnl: f64 = pnls.iter().sum();
+    // fold from +0.0: `Iterator::sum` folds from −0.0, so an empty book would report a
+    // realized PnL of "−0.00".
+    let realized_pnl: f64 = pnls.iter().fold(0.0, |a, b| a + b);
 
     let wins: Vec<f64> = pnls.iter().copied().filter(|p| *p > 0.0).collect();
     let losses: Vec<f64> = pnls.iter().copied().filter(|p| *p < 0.0).collect();
@@ -1660,16 +1735,18 @@ pub async fn breakdown(
 
     let expectancy = (closed_count > 0).then(|| realized_pnl / closed_count as f64);
 
-    // Sharpe over per-trade returns relative to invested capital (unannualized):
-    // mean(return) / stddev(return). Needs >= 2 trades and capital to normalize.
-    let sharpe = if pnls.len() >= 2 && invested_capital > 0.0 {
-        let rets: Vec<f64> = pnls.iter().map(|p| p / invested_capital).collect();
-        let mean = rets.iter().sum::<f64>() / rets.len() as f64;
-        let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (rets.len() as f64 - 1.0);
-        let sd = var.sqrt();
-        (sd > 0.0).then(|| mean / sd)
+    // Sharpe / Sortino over daily returns, annualized. Grouped by the trade's effective
+    // local date, exactly like the analytics view.
+    let (sharpe, sortino) = if invested_capital > 0.0 {
+        let mut by_day: std::collections::BTreeMap<time::Date, f64> =
+            std::collections::BTreeMap::new();
+        for c in &closed {
+            *by_day.entry(trade_effective_date(c.t)).or_insert(0.0) += c.net;
+        }
+        let days: Vec<(time::Date, f64)> = by_day.into_iter().collect();
+        daily_ratios(&days, invested_capital)
     } else {
-        None
+        (None, None)
     };
 
     // Equity curve + max drawdown over cumulative realized PnL (in display currency).
@@ -1717,6 +1794,7 @@ pub async fn breakdown(
         profit_factor,
         expectancy,
         sharpe,
+        sortino,
         max_drawdown,
         best_trade,
         worst_trade,

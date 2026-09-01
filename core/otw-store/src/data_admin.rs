@@ -162,6 +162,18 @@ const MODULES: &[ModuleTables] = &[
             "agent_providers",
         ],
     },
+    ModuleTables {
+        id: "automator",
+        name: "Automator",
+        tables: &[
+            "automator_blobs",
+            "automator_run_steps",
+            "automator_runs",
+            "automator_schedules",
+            "automator_versions",
+            "automator_workflows",
+        ],
+    },
     // Display-only modules with no storage of their own (TradingView embed / analytics over
     // stored data). Listed so they're installable; nothing to size or wipe.
     ModuleTables { id: "economics", name: "Economic Calendar", tables: &[] },

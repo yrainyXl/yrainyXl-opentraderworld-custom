@@ -367,6 +367,40 @@ const SECRET_SELECT: &str = "SELECT nc.id, nc.kind, nc.name, nc.config, \
      nc.secret_vault_item \
      FROM notif_channels nc LEFT JOIN vault_items vi ON vi.id = nc.secret_vault_item";
 
+/// A config field plugged to the vault: `chat_id_vault_item` holds an item id and fills
+/// `chat_id`. The sealed secret of a channel is its credential, but a destination can be
+/// worth hiding too (a Telegram chat id identifies a person), and the same field must
+/// still accept a literal. Resolution happens once, on the way to dispatch, so nothing
+/// downstream has to know where the value came from.
+const VAULT_SUFFIX: &str = "_vault_item";
+
+async fn resolve_config_vault(
+    pool: &PgPool,
+    cipher: &SecretCipher,
+    config: &mut Value,
+    used: &mut Vec<Uuid>,
+) -> anyhow::Result<()> {
+    let Some(obj) = config.as_object() else { return Ok(()) };
+    let refs: Vec<(String, Uuid)> = obj
+        .iter()
+        .filter_map(|(k, v)| {
+            let base = k.strip_suffix(VAULT_SUFFIX)?;
+            let id = v.as_str()?.parse::<Uuid>().ok()?;
+            Some((base.to_string(), id))
+        })
+        .collect();
+    for (base, id) in refs {
+        // A deleted item leaves the field empty rather than sending to whatever literal
+        // was there before it was plugged in.
+        let value = crate::vault::open_item(pool, cipher, id).await?.unwrap_or_default();
+        used.push(id);
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert(base, Value::String(value));
+        }
+    }
+    Ok(())
+}
+
 /// Load every enabled channel `module` is granted, with its secret decrypted, for
 /// dispatch. Filtering in SQL keeps us from decrypting secrets we have no business
 /// using. Each distinct vault used is counted once against its vault-wide quota.
@@ -397,11 +431,13 @@ pub async fn load_enabled(
             }
             _ => None,
         };
+        let mut config = r.config;
+        resolve_config_vault(pool, cipher, &mut config, &mut vault_items).await?;
         out.push(ChannelWithSecret {
             id: r.id,
             kind: r.kind,
             name: r.name,
-            config: r.config,
+            config,
             secret,
         });
     }
@@ -424,20 +460,24 @@ pub async fn load_with_secret(
     match row {
         None => Ok(None),
         Some(r) => {
+            let mut used = Vec::new();
             let secret = match (r.secret_nonce, r.secret_cipher) {
                 (Some(n), Some(c)) => {
                     if let Some(item) = r.secret_vault_item {
-                        crate::vault::bump_vaults_for_items(pool, &[item]).await?;
+                        used.push(item);
                     }
                     Some(cipher.open(&n, &c)?)
                 }
                 _ => None,
             };
+            let mut config = r.config;
+            resolve_config_vault(pool, cipher, &mut config, &mut used).await?;
+            crate::vault::bump_vaults_for_items(pool, &used).await?;
             Ok(Some(ChannelWithSecret {
                 id: r.id,
                 kind: r.kind,
                 name: r.name,
-                config: r.config,
+                config,
                 secret,
             }))
         }

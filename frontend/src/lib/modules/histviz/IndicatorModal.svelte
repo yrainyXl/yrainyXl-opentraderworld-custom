@@ -19,10 +19,12 @@
 
   let { open = $bindable(false), edit = null, onsave, onclose } = $props();
 
-  // Local draft. Seeded from `edit` when editing, else first catalog entry.
+  // Local draft. Seeded from `edit` when editing, else first catalog entry. The params start
+  // complete rather than empty: the form binds a picker to `params.source`, and a bound picker
+  // cannot be handed `undefined`: the first frame is painted before the seeding effect runs.
   let mode = $state('catalog'); // 'catalog' | 'custom'
-  let type = $state('sma');
-  let params = $state({});
+  let type = $state(CATALOG[0].type);
+  let params = $state(defaultParams(CATALOG[0].type));
   let style = $state({ ...DEFAULT_STYLE });
 
   // ── Custom tab state ──
@@ -110,8 +112,11 @@
   $effect(() => {
     if (open && (!lastOpen || edit !== lastEdit)) {
       if (edit) {
-        type = edit.type === 'custom' ? CATALOG[0].type : edit.type;
-        params = { ...(edit.params ?? {}) };
+        const t = edit.type === 'custom' ? CATALOG[0].type : edit.type;
+        type = t;
+        // Over the type's own defaults: an instance only carries the params it was built with
+        // (one derived from a strategy has no price source, for instance).
+        params = { ...defaultParams(t), ...(edit.type === 'custom' ? {} : (edit.params ?? {})) };
         style = { ...DEFAULT_STYLE, ...(edit.style ?? {}) };
       } else {
         type = CATALOG[0].type;

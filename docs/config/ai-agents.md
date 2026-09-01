@@ -21,6 +21,10 @@ Several layers, all of which must pass:
 An endpoint is reachable by agents only because someone added it to the catalog by hand. A new module, or a new route on an existing one, is **invisible to every agent** until that entry exists, so the gateway can never widen by accident as the app grows. Persona and skill management is kept out on purpose: no agent, and no content an agent reads, can edit a persona or widen its skill shelf.
 :::
 
+::: warning The Automator grants writing, not arming
+Granting **Automator** lets an agent read your workflows, create one, write its graph and test it. It does **not** let it put one into service: a graph an agent saves lands as a draft you adopt from the editor, it cannot attach a workflow's access token, and it cannot run a workflow or touch a schedule. A workflow runs under its own token rather than the caller's, so writing a graph and arming it are two separate grants. See [the module page](/modules/automator#letting-an-agent-build-a-workflow).
+:::
+
 ## Enable and create a token
 
 1. Go to **Settings → MCP** and switch it on.
@@ -60,10 +64,13 @@ If the app is reachable only on `localhost` (the default network mode), agents m
 
 ## How agents see the app
 
-Agents get three gateway tools:
+Agents get four gateway tools:
 
 - **`otw_catalog`**: lists the modules and operations the token may call. Only granted modules appear.
 - **`otw_read`**: read operations (need at least *read* on the module).
+- **`otw_compute`**: operations marked *(compute)* in the catalog, which answer a question and store nothing: a backtest, a parameter sweep, risk metrics. They need *read + write* like any POST, but your client will not ask you to approve a calculation.
 - **`otw_write`**: create and update operations (need *read + write*); **delete** operations require *full* on the module.
 
-The token table in Settings shows each token's last-used time, so you can spot and revoke stale ones.
+Responses that carry text from outside (feed articles, incoming mail) reach the agent inside a labelled block telling it to treat the content as data and to ignore any instruction hidden in it.
+
+The token table in Settings shows each token's last-used time, so you can spot and revoke stale ones. A token can also be given an expiry date when you create or edit it: past that date it stops working everywhere, including for the in-app agent.

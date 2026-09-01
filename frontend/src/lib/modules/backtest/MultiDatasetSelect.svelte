@@ -49,11 +49,13 @@
     active = 0;
     queueMicrotask(() => input?.focus());
   }
-  function add(d) {
+  // keepOpen = the leftmost "Add" button: stack another dataset without leaving the list.
+  function add(d, keepOpen = false) {
     if (!canAdd(d)) return;
     values = [...values, d.id];
     query = '';
-    if (values.length >= MAX) open = false;
+    if (!keepOpen || values.length >= MAX) open = false;
+    else queueMicrotask(() => input?.focus());
   }
   function remove(id) {
     values = values.filter((v) => v !== id);
@@ -78,6 +80,8 @@
     active = 0;
   });
   function onDocClick(e) {
+    // A click on a row the update just removed lands on a detached node: not an outside click.
+    if (!e.target?.isConnected) return;
     if (root && !root.contains(e.target)) open = false;
   }
   const fmtBars = (n) => $t('backtest.dataset.bars', { count: Number(n).toLocaleString() });
@@ -132,19 +136,33 @@
           {#each g.sets as d (d.id)}
             {@const i = flat.indexOf(d)}
             {@const allowed = canAdd(d)}
-            <button
-              type="button"
+            <div
               class="opt"
               class:active={i === active}
-              disabled={!allowed}
+              class:off={!allowed}
               onmouseenter={() => (active = i)}
-              onclick={() => add(d)}
+              role="presentation"
             >
-              <span class="tk">{d.ticker}</span>
-              <span class="chip">{d.timeframe}</span>
-              <span class="meta">{d.provider}</span>
-              <span class="bars">{fmtBars(d.bar_count)}</span>
-            </button>
+              <button
+                type="button"
+                class="stay"
+                disabled={!allowed}
+                title={$t('backtest.multi.addKeepOpen')}
+                aria-label={$t('backtest.multi.addKeepOpen')}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  add(d, true);
+                }}
+              >
+                <Icon name="plus" size={12} />
+              </button>
+              <button type="button" class="pick" disabled={!allowed} onclick={() => add(d)}>
+                <span class="tk">{d.ticker}</span>
+                <span class="chip">{d.timeframe}</span>
+                <span class="meta">{d.provider}</span>
+                <span class="bars">{fmtBars(d.bar_count)}</span>
+              </button>
+            </div>
           {/each}
         {/each}
         {#if !flat.length}
@@ -172,7 +190,7 @@
     align-items: center;
     gap: var(--space-1);
     background: var(--surface-2);
-    border: 0.5px solid var(--border-control);
+    border: var(--hairline) solid var(--border-control);
     border-radius: 0;
     padding: 2px var(--space-1) 2px var(--space-2);
     font-size: var(--text-xs);
@@ -203,18 +221,20 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-height: var(--control-h);
     background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border-control);
+    border-radius: 0;
     color: var(--text);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-3);
     font: inherit;
-    font-size: var(--text-base);
+    font-size: var(--text-sm);
     cursor: pointer;
     text-align: left;
+    transition: border-color var(--dur-fast) var(--ease);
   }
   .trigger:hover:not(:disabled) {
-    border-color: var(--border-control);
+    border-color: var(--accent);
   }
   .trigger:disabled {
     opacity: 0.5;
@@ -241,12 +261,12 @@
   .menu {
     position: absolute;
     z-index: 30;
-    top: calc(100% + 6px);
+    top: calc(100% + 4px);
     left: 0;
     right: 0;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border-control);
+    border-radius: 0;
     box-shadow: var(--shadow-2);
     padding: var(--space-2);
   }
@@ -280,24 +300,48 @@
   .opt {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
     width: 100%;
+    padding: 0 var(--space-2) 0 var(--space-1);
+  }
+  .opt.off {
+    opacity: 0.4;
+  }
+  .opt.active:not(.off) {
+    background: var(--surface-2);
+  }
+  .pick {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
     text-align: left;
     background: none;
     border: none;
     color: var(--text);
-    padding: var(--space-2);
-    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
+    border-radius: 0;
     cursor: pointer;
     font: inherit;
     font-size: var(--text-sm);
   }
-  .opt:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  .stay {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--muted);
+    padding: var(--space-1);
+    border-radius: 0;
+    cursor: pointer;
   }
-  .opt.active:not(:disabled) {
-    background: var(--surface-2);
+  .stay:hover:not(:disabled) {
+    color: var(--accent);
+  }
+  .pick:disabled,
+  .stay:disabled {
+    cursor: not-allowed;
   }
   .tk {
     font-weight: var(--fw-medium);

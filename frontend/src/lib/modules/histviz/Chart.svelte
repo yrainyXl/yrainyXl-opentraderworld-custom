@@ -58,6 +58,9 @@
     // markers the engine replayed. The position itself lives with the page.
     quick = false,
     marks = [],
+    // Print the size next to each marker. A click-through session sizes by hand, so the number
+    // means something; a simulated fill's size is arithmetic, and only clutters the chart.
+    markSizes = true,
     quickSize = $bindable(1),
     quickUnitLabel = '', // what the size box counts: units, contracts, dollars…
     // Instrument identity, printed on the chart itself the way market tools do it.
@@ -1251,14 +1254,34 @@
   // marker that is a dozen pixels wide, it is a smear. Six decimals, trailing zeros dropped.
   const fmtSize = (v) => Number(Number(v).toFixed(6)).toString();
 
+  /** Marks in time order, so the visible slice can be found by binary search. A click-through
+   *  session has a handful of them; a backtest hands over one pair per trade, which on a long
+   *  run is six figures, and walking that list on every frame is what makes a chart stutter. */
+  const sortedMarks = $derived(marks.length > 1 ? [...marks].sort((a, b) => a.x - b.x) : marks);
+  /** Roughly one marker per bar is the point where a fill is still a shape you can aim at;
+   *  past that the chart is ink, not information, so it says so and draws none until the
+   *  window narrows. The floor keeps a handful readable at maximum zoom, the ceiling keeps a
+   *  full-history view from painting thousands of triangles. */
+  const markLimit = (visibleBars) => Math.max(40, Math.min(400, visibleBars));
+  /** Sizes are only legible while the markers are far apart. */
+  const MARK_LABELS = 30;
+
   /** Markers, projected like drawings: a triangle at the fill price, blue up for a long and
    *  red down for a short. Entries are solid, exits hollow. */
-  const markShapes = $derived.by(() => {
+  const markView = $derived.by(() => {
     void paintTick;
     const r = clip;
-    if (!r || !view || !marks.length) return [];
+    if (!r || !view || !sortedMarks.length) return { shapes: [], dense: false };
+    // One bar of slack each side so a marker sitting on the edge is not clipped away.
+    const t0 = msFromIdx(win.s - 1);
+    const t1 = msFromIdx(win.e + 1);
+    const lo = lowerBound(sortedMarks, t0);
+    const hi = lowerBound(sortedMarks, t1);
+    if (hi - lo > markLimit(win.e - win.s + 1)) return { shapes: [], dense: true };
+    const labels = markSizes && hi - lo <= MARK_LABELS;
     const out = [];
-    for (const m of marks) {
+    for (let i = lo; i < hi; i++) {
+      const m = sortedMarks[i];
       const x = xPix(idxFromMs(m.x));
       const y = yPix(m.y);
       if (x == null || y == null) continue;
@@ -1272,12 +1295,25 @@
         points: `${x},${tip} ${x - 6},${base} ${x + 6},${base}`,
         x,
         y: base + (up ? 11 : -3),
-        label: fmtSize(m.qty),
+        label: labels ? fmtSize(m.qty) : '',
         title: `${m.side} ${fmtSize(m.qty)} @ ${fmtPrice(m.y)}`
       });
     }
-    return out;
+    return { shapes: out, dense: false };
   });
+  const markShapes = $derived(markView.shapes);
+
+  /** First index whose instant is >= `ms`. */
+  function lowerBound(list, ms) {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid].x < ms) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
 
   /** Rows the price-pane header carries: the instrument, then the overlays drawn on it. */
   const headRows = $derived(legend.slice(2).filter((r) => r.pane == null));
@@ -1901,6 +1937,27 @@
     if (to <= from) return null;
     return { t0: view.ts[from], t1: view.ts[to] };
   }
+
+  /**
+   * Frame a span of time, centred, with air around it.
+   *
+   * The window is sized from the span itself (`pad` of its length on each side) so a two-bar
+   * trade and a two-hundred-bar one both land readable, and never goes tighter than `minBars`,
+   * which is what keeps a scalp from opening on three candles filling the screen.
+   *
+   * @param fromMs first instant to show, epoch ms
+   * @param toMs   last instant to show, epoch ms
+   */
+  export function focusRange(fromMs, toMs, { minBars = 60, pad = 0.6 } = {}) {
+    if (!view || !n || !Number.isFinite(fromMs)) return;
+    const i0 = idxFromMs(fromMs);
+    const i1 = Number.isFinite(toMs) ? idxFromMs(toMs) : i0;
+    const len = Math.max(1, i1 - i0);
+    const span = Math.max(minBars, Math.round(len * (1 + 2 * pad)));
+    const mid = (i0 + i1) / 2;
+    yMan = null;
+    setWin(Math.round(mid - span / 2), Math.round(mid + span / 2));
+  }
 </script>
 
 <!-- role=application: this is a direct-manipulation surface with its own key bindings
@@ -2146,7 +2203,7 @@
             >
               <title>{m.title}</title>
             </polygon>
-            {#if m.label !== '1'}
+            {#if m.label && m.label !== '1'}
               <text class="qty" x={m.x} y={m.y} text-anchor="middle" fill={m.color} stroke="none"
                 >{m.label}</text
               >
@@ -2162,10 +2219,10 @@
     <div class="quick-menu" style:left="{quickMenu.left}px" style:top="{quickMenu.top}px">
       <div class="qrow">
         <button type="button" class="qbtn long" onclick={() => quickSubmit('long')}>
-          <Icon name="arrow-up" size={12} /> {$t('histviz.quick.long')}
+          <Icon name="arrow-up" size={12} /> {$t('analysis.long')}
         </button>
         <button type="button" class="qbtn short" onclick={() => quickSubmit('short')}>
-          <Icon name="arrow-down" size={12} /> {$t('histviz.quick.short')}
+          <Icon name="arrow-down" size={12} /> {$t('analysis.short')}
         </button>
       </div>
       <label class="qqty">
@@ -2311,6 +2368,11 @@
     <button class="autoscale" onclick={() => (yMan = null)} title={$t('histviz.chart.autoScaleHint')}>
       {$t('histviz.chart.autoScale')}
     </button>
+  {/if}
+
+  <!-- Too many fills in the window to read: say it, rather than paint a wall of triangles. -->
+  {#if markView.dense}
+    <span class="marks-dense">{$t('histviz.chart.marksDense')}</span>
   {/if}
 
   <!-- History control, pinned to the left edge where the loaded data ends. Clicking is the
@@ -2898,6 +2960,21 @@
     font-size: var(--text-xs);
     cursor: pointer;
     backdrop-filter: blur(2px);
+  }
+  /* Sits under the top-right controls, out of the header's way. */
+  .marks-dense {
+    position: absolute;
+    right: 6px;
+    top: 34px;
+    z-index: 5;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px 8px;
+    color: var(--muted);
+    font-size: var(--text-xs);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
   }
   /* History control: vertically centred against the price pane, at the left gutter — it
      marks where the loaded data ends, so it reads as the edge of history itself. */

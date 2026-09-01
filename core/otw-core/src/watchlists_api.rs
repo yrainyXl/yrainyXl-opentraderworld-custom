@@ -503,8 +503,8 @@ async fn delete_alert(
 
 // ── Import from a Portfolio Tracker portfolio ─────────────────────────────────
 
-#[derive(Deserialize)]
-struct ImportBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct ImportBody {
     portfolio_id: Uuid,
 }
 

@@ -358,6 +358,9 @@ case "$START_NOW" in
     echo
     bold "Up. Open ${APP_URL} and sign in."
     case "$NET_CHOICE" in
+      2) info "If the browser turns the address into https:// and fails to connect, its HTTPS-only"
+         info "mode is caching a redirect: open ${APP_URL} in a private window (Chrome incognito,"
+         info "Firefox private) to check, then allow HTTP for that address, or pick mode 3 (LAN + HTTPS)." ;;
       3|4) info "The first HTTPS request can take ~30 s while the certificate is issued." ;;
     esac
     if [[ "$NET_CHOICE" == "4" ]]; then

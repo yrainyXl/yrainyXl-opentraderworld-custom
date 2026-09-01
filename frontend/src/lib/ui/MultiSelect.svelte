@@ -14,6 +14,7 @@
     allLabel = '',
     width = '160px',
     flat = false, // square + hairline border, to sit in a row of flat table controls
+    disabled = false,
     onchange = () => {}
   } = $props();
 
@@ -70,6 +71,7 @@
     class="ms-toggle"
     class:flat
     class:on={value.length > 0}
+    {disabled}
     aria-expanded={open}
     onclick={() => (open = !open)}
   >
@@ -116,9 +118,13 @@
     padding: 6px 8px;
     white-space: nowrap;
   }
-  .ms-toggle:hover {
+  .ms-toggle:hover:not(:disabled) {
     background: var(--surface-2);
     border-color: var(--border-control);
+  }
+  .ms-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   /* Match a row of flat controls (hairline border, square corners) exactly, so the
      toggles line up with the buttons and inputs beside them. */

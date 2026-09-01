@@ -16,7 +16,43 @@
 //! Recording is fire-and-forget: each event is a detached task, so a slow/failed DB write never
 //! stalls the outbound call path.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use otw_store::api_rate::{self, Outcome};
+
+/// Last `Retry-After` a provider asked for, as the instant it expires. Written when a 429
+/// carries the header, read by callers that must decide *when* to come back (the histdata
+/// download worker parks a job until then). This is information, not throttling: nothing
+/// here delays a request on its own.
+static RETRY_AFTER: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+/// Cap on a provider-supplied Retry-After, so a hostile or mistaken header can't park a
+/// download for a week.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+fn note_retry_after(provider: &str, header: Option<&str>) {
+    // Only the delta-seconds form is used in practice by these APIs; an HTTP-date value is
+    // ignored rather than mis-parsed (the caller then falls back to its own backoff).
+    let Some(secs) = header.and_then(|v| v.trim().parse::<u64>().ok()) else {
+        return;
+    };
+    let wait = Duration::from_secs(secs).min(MAX_RETRY_AFTER);
+    if let Ok(mut guard) = RETRY_AFTER.lock() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(provider.to_string(), Instant::now() + wait);
+    }
+}
+
+/// How long `provider` last asked us to wait, counted from now. `None` when it never sent a
+/// Retry-After or the delay has already elapsed.
+pub fn retry_after(provider: &str) -> Option<Duration> {
+    let guard = RETRY_AFTER.lock().ok()?;
+    let until = *guard.as_ref()?.get(provider)?;
+    until.checked_duration_since(Instant::now())
+}
 
 /// Extract a bare host (no scheme/port/path) from a URL for grouping.
 fn host_of(url: &str) -> String {
@@ -61,12 +97,14 @@ pub async fn send(
                 Outcome::Ok
             };
             let detail = if outcome == Outcome::Limited {
-                // Retry-After, when present, is the most useful thing to surface.
-                resp.headers()
+                // Retry-After, when present, is the most useful thing to surface — both on
+                // the dashboard and to a worker deciding when to come back.
+                let header = resp
+                    .headers()
                     .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| format!("retry-after: {s}"))
-                    .unwrap_or_default()
+                    .and_then(|v| v.to_str().ok());
+                note_retry_after(provider, header);
+                header.map(|s| format!("retry-after: {s}")).unwrap_or_default()
             } else {
                 String::new()
             };

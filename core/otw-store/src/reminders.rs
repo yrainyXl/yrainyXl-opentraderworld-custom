@@ -625,6 +625,15 @@ pub async fn mark_all_read(pool: &PgPool) -> anyhow::Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Delete every notification ("clear all"). Returns how many were removed.
+pub async fn delete_all_notifications(pool: &PgPool) -> anyhow::Result<u64> {
+    let res = sqlx::query("DELETE FROM notifications")
+        .execute(pool)
+        .await
+        .context("clearing all notifications")?;
+    Ok(res.rows_affected())
+}
+
 pub async fn delete_notification(pool: &PgPool, id: Uuid) -> anyhow::Result<bool> {
     let res = sqlx::query("DELETE FROM notifications WHERE id = $1")
         .bind(id)

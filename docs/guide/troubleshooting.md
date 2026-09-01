@@ -11,7 +11,31 @@
 | `POSTGRES_PASSWORD` error on startup | `deploy/.env` is missing or empty. Run `./setup.sh`, or copy `.env.example` to `.env` and fill it in. |
 | Public mode: HTTPS cert not issued | The domain's DNS must resolve to this server, and ports 80/443 must be reachable from the internet. |
 | Code changes not reflected | Rebuild: `docker compose up --build -d`. |
+| Locked out, password forgotten | Reset it from the host shell, see [Forgot your password](#forgot-password). |
 | Can't reach the app after picking the wrong network mode | Edit `deploy/network.env` by hand and restart, see [changing the mode from the CLI](/config/network#change-mode-cli). |
+
+## Forgot your password {#forgot-password}
+
+There is no reset email and no unauthenticated reset form: OTW runs on your own server, so any endpoint that could change a password without being signed in would be a way in. The reset lives on the **host shell** instead, and the sign-in page's *Forgot password?* link spells out the same steps.
+
+Open a shell on the machine running OTW and print a one-time password:
+
+```bash
+docker exec -it opentraderworld-core-1 /app/otw-core reset-password USERNAME
+```
+
+Sign in with it; the app asks for a new one straight away.
+
+| Case | What to run |
+|---|---|
+| Forgot the username too | `docker exec opentraderworld-core-1 /app/otw-core list-users` |
+| Choose the password yourself | `printf '%s' 'my-new-password' \| docker exec -i opentraderworld-core-1 /app/otw-core reset-password USERNAME --stdin` |
+| Container named differently | `docker ps`, then use the core one in place of `opentraderworld-core-1`. |
+| Not running Docker | Run the `otw-core` binary with the same arguments and `DATABASE_URL` set. |
+
+Never pass a password as a command-line argument: a process's command line is readable on the host, which is why `--stdin` exists.
+
+Notes: a reset **signs out every device**, and nothing is lost. The vault and the stored provider keys are sealed with `OTW_SECRET_KEY`, not with your password.
 
 ## Reading logs
 

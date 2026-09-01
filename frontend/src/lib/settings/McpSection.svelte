@@ -28,6 +28,8 @@
   let editing = $state(null);
   let formName = $state('');
   let formPerms = $state({});
+  // Expiry as a days-from-now choice: '' = leave as it is (edit only), '0' = never.
+  let formExpiry = $state('0');
   let formError = $state('');
   let saving = $state(false);
 
@@ -116,6 +118,7 @@
     editing = null;
     formName = '';
     formPerms = {};
+    formExpiry = '0';
     formError = '';
     modalOpen = true;
   }
@@ -124,6 +127,7 @@
     editing = tok;
     formName = tok.name;
     formPerms = { ...(tok.permissions ?? {}) };
+    formExpiry = '';
     formError = '';
     modalOpen = true;
   }
@@ -147,10 +151,20 @@
     saving = true;
     formError = '';
     try {
+      // '' means "don't touch the expiry", so the field is left out of the payload.
+      const expiry = formExpiry === '' ? {} : { expires_in_days: Number(formExpiry) };
       if (editing) {
-        await settingsApi.updateMcpToken(editing.id, { name: formName, permissions: formPerms });
+        await settingsApi.updateMcpToken(editing.id, {
+          name: formName,
+          permissions: formPerms,
+          ...expiry,
+        });
       } else {
-        const r = await settingsApi.createMcpToken({ name: formName, permissions: formPerms });
+        const r = await settingsApi.createMcpToken({
+          name: formName,
+          permissions: formPerms,
+          ...expiry,
+        });
         createdToken = r.token;
         createdOpen = true;
       }
@@ -197,6 +211,10 @@
       return iso;
     }
   };
+  const isExpired = (tok) => !!tok.expires_at && new Date(tok.expires_at) <= new Date();
+  const fmtExpiry = (tok) =>
+    tok.expires_at ? fmtDate(tok.expires_at) : $t('settings.mcp.expiryNever');
+
   // "Last used" — fmtDateTime drops the seconds the raw toLocaleString() prints, which
   // nobody reads on this column. (LogsSection and RateSection keep the raw call: there,
   // the seconds are the point.)
@@ -241,6 +259,7 @@
             <th>{$t('settings.mcp.colPermissions')}</th>
             <th>{$t('settings.mcp.colCreated')}</th>
             <th>{$t('settings.mcp.colLastUsed')}</th>
+            <th>{$t('settings.mcp.colExpires')}</th>
             <th></th>
           </tr>
         </thead>
@@ -252,6 +271,7 @@
               <td><Skeleton height="0.85rem" width="50%" /></td>
               <td><Skeleton height="0.85rem" width="75%" /></td>
               <td><Skeleton height="0.85rem" width="75%" /></td>
+              <td><Skeleton height="0.85rem" width="60%" /></td>
               <td><Skeleton height="0.85rem" width="40%" /></td>
             </tr>
           {/each}
@@ -272,6 +292,7 @@
             <th>{$t('settings.mcp.colPermissions')}</th>
             <th>{$t('settings.mcp.colCreated')}</th>
             <th>{$t('settings.mcp.colLastUsed')}</th>
+            <th>{$t('settings.mcp.colExpires')}</th>
             <th></th>
           </tr>
         </thead>
@@ -283,6 +304,9 @@
               <td>{permSummary(tok.permissions)}</td>
               <td>{fmtDate(tok.created_at)}</td>
               <td>{fmtTime(tok.last_used_at)}</td>
+              <td class:expired={isExpired(tok)}>
+                {fmtExpiry(tok)}{#if isExpired(tok)} · {$t('settings.mcp.expired')}{/if}
+              </td>
               <td class="actions">
                 <button class="ghost" onclick={() => openEdit(tok)}>
                   <Icon name="pencil" size={12} /> {$t('settings.mcp.edit')}
@@ -328,6 +352,23 @@
       <span>{$t('settings.mcp.name')}</span>
       <input type="text" bind:value={formName} placeholder={$t('settings.mcp.namePlaceholder')} maxlength="80" />
     </label>
+
+    <label class="field">
+      <span>{$t('settings.mcp.expiry')}</span>
+      <Dropdown
+        value={formExpiry}
+        onpick={(v) => (formExpiry = v)}
+        ariaLabel={$t('settings.mcp.expiry')}
+        options={[
+          ...(editing ? [{ value: '', label: $t('settings.mcp.expiryKeep') }] : []),
+          { value: '0', label: $t('settings.mcp.expiryNever') },
+          { value: '30', label: $t('settings.mcp.expiryDays', { n: 30 }) },
+          { value: '90', label: $t('settings.mcp.expiryDays', { n: 90 }) },
+          { value: '365', label: $t('settings.mcp.expiryDays', { n: 365 }) }
+        ]}
+      />
+    </label>
+    <p class="muted small">{$t('settings.mcp.expiryHint')}</p>
 
     <div class="permhead">
       <span>{$t('settings.mcp.permissions')}</span>
@@ -489,6 +530,11 @@
     font-family: var(--mono);
     color: var(--muted);
   }
+  /* An expired token is not an error, it is a token that did its job: amber, not red. */
+  td.expired {
+    color: var(--amber);
+  }
+
   .actions {
     text-align: right;
   }

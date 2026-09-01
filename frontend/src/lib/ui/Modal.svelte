@@ -24,13 +24,43 @@
       close();
     }
   }
+
+  // The dialog itself is the scroller, so the head and the foot are sticky rather than
+  // pushed out of view by a long body: a picker with fifty rows must still show its title
+  // and its action buttons. The separating filet is only drawn when the body really
+  // overflows, so a modal that fits keeps exactly the layout it had.
+  let box = $state(null);
+  let overflows = $state(false);
+
+  // The class itself adds padding to the foot, so it grows the box it is measured from: a
+  // modal whose body lands within that padding of the limit would set it, no longer fit,
+  // clear it, fit again, forever. The observer would re-fire on each flip and lock the
+  // page. Hence the hysteresis, and no write when nothing changed.
+  $effect(() => {
+    if (!box) return;
+    let on = false;
+    const measure = () => {
+      const slack = box.scrollHeight - box.clientHeight;
+      const next = on ? slack > -24 : slack > 1;
+      if (next === on) return;
+      on = next;
+      overflows = next;
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    for (const child of box.children) ro.observe(child);
+    measure();
+    return () => ro.disconnect();
+  });
 </script>
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="backdrop" onclick={close} role="presentation">
     <div
+      bind:this={box}
       class="modal {size}"
+      class:overflows
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -98,10 +128,14 @@
     }
   }
   .modal-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: var(--space-4);
+    background: var(--surface);
     border-bottom: var(--hairline) solid var(--border);
   }
   .modal-head h3 {
@@ -131,9 +165,17 @@
     padding: var(--space-4);
   }
   .modal-foot {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     display: flex;
     justify-content: flex-end;
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
+    background: var(--surface);
+  }
+  .modal.overflows .modal-foot {
+    padding-top: var(--space-3);
+    border-top: var(--hairline) solid var(--border);
   }
 </style>
