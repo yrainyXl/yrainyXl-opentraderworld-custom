@@ -78,6 +78,20 @@
 - **如何验证**：A 股上涨行显示红色、下跌行绿色；美股/加密行仍为绿涨红跌。
 - **如何回滚**：还原前端格式函数中的 CN 分支判定。
 
+### C-007 Investment Case MVP（Phase 1，2026-09-01）
+
+- **修改原因**：从 Portfolio 资产行进入按 instrument 的研究页面；决策带冻结快照；研究正文复用 Editor。
+- **修改文件**：
+  - 后端：`migrations/9000000102_investment_cases.sql`、`core/otw-store/src/investment_cases.rs`（新）、`documents.rs`（`create_with` tx-compatible 重构）、`portfolios.rs`（`position_usd`/`asset_view` → `pub(crate)`，仅可见性）、`lib.rs`、`core/otw-core/src/investment_cases_api.rs`（新，5 端点 + 每 handler ownership 校验）、`documents.rs`（research 文档 ownership guard + DELETE 409 + FK 23503 映射）、`main.rs`。
+  - 前端：`routes/investment-cases/[id]/+page.svelte`、`lib/modules/investment-cases/{api.js,DecisionModal.svelte}`、`PortfolioDetail.svelte`（研究入口）、i18n en/zh。
+  - 文档：`docs/design/PHASE1_INVESTMENT_CASE.md`（设计 v2）、`CHANGELOG.md`。
+- **数据库 migration**：`9000000102_investment_cases.sql` —— `investment_cases`（`user_id → users(id) ON DELETE CASCADE`，`UNIQUE(user_id, provider, provider_id)`，`document_id → documents(id) ON DELETE RESTRICT`）+ `decision_records`（冻结 snapshot，`decision_type` CHECK 6 值，`confidence smallint 1–5`）。
+- **财务口径**：live/快照复用 `position_usd` USD ledger（逐笔按 op_date FX）+ 今日 FX 折回 instrument 币种 —— 与 Portfolio 页完全一致（接受用例 C 数值相等）；avg cost 为 ledger 显示值，非历史 native（既有产品语义）。
+- **并发安全**：`ensure_case` 事务内 `ON CONFLICT DO NOTHING` + 竞争失败整体 rollback（document 不落库）→ 1 case + 1 document + 0 orphan（10 并发实测）。
+- **Upstream 潜在冲突点**：低（全部为新增文件/新增表；仅 `documents.rs`/`portfolios.rs` 小改动，冲突面小）。
+- **如何验证**：cargo check + tests（otw-store 35、otw-core 445）+ frontend build + 冒烟 A–J（见设计文档 §N）。
+- **如何回滚**：恢复 `otw-core:rollback-pre-phase1` / `otw-frontend:rollback-pre-phase1` image；DB 侧 `DELETE FROM decision_records; DELETE FROM investment_cases;` + `DELETE FROM _sqlx_migrations WHERE version = 9000000102`（旧 binary 内嵌无 9000000102，多出的行会 VersionMissing，必须删 row；两表数据可先备份）。
+
 ### C-006 v0.0.9 升级（2026-09-01）
 
 - **修改原因**：从官方基线 v0.0.8 升级到 v0.0.9（Automator 模块、Backtest DCA/Optimizer、Editor 视频块、histdata rate-limit 等）。
