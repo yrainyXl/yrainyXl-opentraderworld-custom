@@ -88,30 +88,35 @@ async fn live(
     let user_id = user.id;
     let case = owned_case(&state.pool, id, user_id).await?;
     let pos = investment_cases::instrument_position(&state.pool, &case).await?;
-    Ok(Json(json!({
-        "instrument": {
-            "provider": case.provider,
-            "provider_id": case.provider_id,
-            "symbol": case.symbol,
-            "name": case.name,
-            "exchange": case.exchange,
-            "currency": case.currency,
-            "asset_class": case.asset_class,
-        },
-        "price": pos.price,
-        "price_at": pos.price_at,
-        "currency": case.currency,
-        "position": {
-            "quantity": pos.quantity,
-            "avg_cost": pos.avg_cost,
-            "cost_basis": pos.cost_basis,
-            "market_value": pos.market_value,
-            "unrealized_pnl": pos.unrealized_pnl,
-            "unrealized_pct": pos.unrealized_pct,
-        },
-        "portfolios": pos.portfolios,
-        "operations": pos.operations,
-    })))
+    // Serialize the position struct as a whole so its `#[serde(with = rfc3339)]`
+    // attributes apply (field access would use OffsetDateTime's default format).
+    let mut payload =
+        serde_json::to_value(&pos).map_err(|e| ApiError::internal(&e.to_string()))?;
+    if let Some(o) = payload.as_object_mut() {
+        let position = json!({
+            "quantity": o.remove("quantity"),
+            "avg_cost": o.remove("avg_cost"),
+            "cost_basis": o.remove("cost_basis"),
+            "market_value": o.remove("market_value"),
+            "unrealized_pnl": o.remove("unrealized_pnl"),
+            "unrealized_pct": o.remove("unrealized_pct"),
+        });
+        o.insert("position".into(), position);
+        o.insert(
+            "instrument".into(),
+            json!({
+                "provider": case.provider,
+                "provider_id": case.provider_id,
+                "symbol": case.symbol,
+                "name": case.name,
+                "exchange": case.exchange,
+                "currency": case.currency,
+                "asset_class": case.asset_class,
+            }),
+        );
+        o.insert("currency".into(), json!(case.currency));
+    }
+    Ok(Json(payload))
 }
 
 #[derive(Deserialize)]
