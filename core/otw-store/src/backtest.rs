@@ -150,17 +150,32 @@ pub async fn delete_unpinned_runs(pool: &PgPool) -> anyhow::Result<u64> {
     Ok(res.rows_affected())
 }
 
-// ── Strategies + custom indicators (expert-mode library) ────────────────────────────────
+// ── Strategies + custom indicators (library) ────────────────────────────────────────────
 //
 // Both are simple named-JSON libraries: list / get / create / update / duplicate / delete.
 // `settings` (strategy) and `definition` (indicator) are opaque JSON here — otw-core owns
 // their shape. Names are unique; a create/update with a taken name surfaces a clear error.
+
+/// Normalise tags: trim, drop empties, dedup (case-insensitive), preserve order.
+fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim();
+        if t.is_empty() || out.iter().any(|s| s.eq_ignore_ascii_case(t)) {
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    out
+}
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Strategy {
     pub id: Uuid,
     pub name: String,
     pub description: String,
+    /// Free-form labels the library's search box matches on, alongside the name.
+    pub tags: Vec<String>,
     pub settings: JsonValue,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -168,7 +183,7 @@ pub struct Strategy {
     pub updated_at: OffsetDateTime,
 }
 
-const STRAT_COLS: &str = "id, name, description, settings, created_at, updated_at";
+const STRAT_COLS: &str = "id, name, description, tags, settings, created_at, updated_at";
 
 pub async fn list_strategies(pool: &PgPool) -> anyhow::Result<Vec<Strategy>> {
     let sql = format!("SELECT {STRAT_COLS} FROM backtest_strategies ORDER BY updated_at DESC");
@@ -184,15 +199,18 @@ pub async fn create_strategy(
     pool: &PgPool,
     name: &str,
     description: &str,
+    tags: &[String],
     settings: &JsonValue,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO backtest_strategies (id, name, description, settings) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO backtest_strategies (id, name, description, tags, settings) \
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(id)
     .bind(name)
     .bind(description)
+    .bind(clean_tags(tags))
     .bind(settings)
     .execute(pool)
     .await
@@ -205,15 +223,18 @@ pub async fn update_strategy(
     id: Uuid,
     name: &str,
     description: &str,
+    tags: &[String],
     settings: &JsonValue,
 ) -> anyhow::Result<bool> {
     let res = sqlx::query(
-        "UPDATE backtest_strategies SET name = $2, description = $3, settings = $4, updated_at = now() \
+        "UPDATE backtest_strategies SET name = $2, description = $3, tags = $4, settings = $5, \
+                updated_at = now() \
          WHERE id = $1",
     )
     .bind(id)
     .bind(name)
     .bind(description)
+    .bind(clean_tags(tags))
     .bind(settings)
     .execute(pool)
     .await

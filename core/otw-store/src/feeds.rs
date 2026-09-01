@@ -723,7 +723,7 @@ pub async fn create_dashboard(pool: &PgPool, name: &str) -> anyhow::Result<Dashb
     Ok(to_dash(row))
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct DashboardPatch {
     pub name: Option<String>,
     pub started: Option<bool>,

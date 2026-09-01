@@ -389,8 +389,8 @@ async fn get_dashboard(
     Ok(Json(json!({ "dashboard": dash })))
 }
 
-#[derive(Deserialize)]
-struct CreateDashboard {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct CreateDashboard {
     #[serde(default)]
     name: String,
 }
@@ -466,8 +466,8 @@ async fn list_dashboard_sources(
 ///   - otherwise create a new source from `kind`/`config`/`interval_secs`,
 ///     unless `force` is false and an identical source already exists, in which
 ///     case we return `{ duplicate: <match> }` so the client can prompt to reuse.
-#[derive(Deserialize)]
-struct AddSource {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct AddSource {
     feed_id: Option<Uuid>,
     #[serde(default)]
     name: String,

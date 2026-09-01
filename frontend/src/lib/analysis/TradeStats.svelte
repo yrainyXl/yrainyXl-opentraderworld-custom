@@ -3,8 +3,8 @@
   // headline numbers, the two gross sides split by direction, the streaks, then the two
   // distributions. Everything is derived from the closed trades — nothing is stored.
   import { t } from '$lib/i18n';
-  import QuickDist from './QuickDist.svelte';
-  import { sideStats, streaks } from './quicktest.js';
+  import TradeDist from './TradeDist.svelte';
+  import { sideStats, streaks } from './trades.js';
 
   let { s = {}, trades = [], open = null, live = 0 } = $props();
 
@@ -33,30 +33,30 @@
 
   // ── Headline ──
   const heads = $derived([
-    { label: $t('histviz.quick.netPnl'), value: signed(s.pnl), tone: s.pnl },
-    { label: $t('histviz.quick.maxDrawdown'), value: num(s.maxDrawdown), tone: s.maxDrawdown ? -1 : 0 },
+    { label: $t('analysis.netPnl'), value: signed(s.pnl), tone: s.pnl },
+    { label: $t('analysis.maxDrawdown'), value: num(s.maxDrawdown), tone: s.maxDrawdown ? -1 : 0 },
     {
-      label: $t('histviz.quick.profitableTrades'),
+      label: $t('analysis.profitableTrades'),
       value: pct(s.winRate),
       sub: `${s.wins ?? 0}/${s.trades ?? 0}`
     },
-    { label: $t('histviz.quick.profitFactor'), value: fixed(s.profitFactor), tone: (s.profitFactor ?? 1) - 1 }
+    { label: $t('analysis.profitFactor'), value: fixed(s.profitFactor), tone: (s.profitFactor ?? 1) - 1 }
   ]);
 
   // ── Performance analysis ──
   const perf = $derived([
-    { label: $t('histviz.quick.grossProfit'), value: num(s.grossWin), tone: 1 },
-    { label: $t('histviz.quick.grossLoss'), value: num(s.grossLoss), tone: -1 },
-    { label: $t('histviz.quick.expectancy'), value: signed(s.expectancy), tone: s.expectancy },
-    { label: $t('histviz.quick.avgR'), value: fixed(s.avgR), tone: s.avgR, title: $t('histviz.quick.rHint') },
-    { label: $t('histviz.quick.best'), value: signed(s.best), tone: s.best },
-    { label: $t('histviz.quick.worst'), value: signed(s.worst), tone: s.worst },
-    { label: $t('histviz.quick.avgWin'), value: signed(s.avgWin), tone: 1 },
-    { label: $t('histviz.quick.avgLoss'), value: signed(s.avgLoss), tone: -1 },
-    { label: $t('histviz.quick.avgRunup'), value: signed(s.avgRunup), tone: 1 },
-    { label: $t('histviz.quick.avgMae'), value: signed(s.avgMae), tone: -1 },
-    { label: $t('histviz.quick.avgHold'), value: duration(s.avgHoldMs) },
-    { label: $t('histviz.quick.avgPnlPct'), value: s.avgPnlPct == null ? '—' : `${signed(s.avgPnlPct)}%`, tone: s.avgPnlPct }
+    { label: $t('analysis.grossProfit'), value: num(s.grossWin), tone: 1 },
+    { label: $t('analysis.grossLoss'), value: num(s.grossLoss), tone: -1 },
+    { label: $t('analysis.expectancy'), value: signed(s.expectancy), tone: s.expectancy },
+    { label: $t('analysis.avgR'), value: fixed(s.avgR), tone: s.avgR, title: $t('analysis.rHint') },
+    { label: $t('analysis.best'), value: signed(s.best), tone: s.best },
+    { label: $t('analysis.worst'), value: signed(s.worst), tone: s.worst },
+    { label: $t('analysis.avgWin'), value: signed(s.avgWin), tone: 1 },
+    { label: $t('analysis.avgLoss'), value: signed(s.avgLoss), tone: -1 },
+    { label: $t('analysis.avgRunup'), value: signed(s.avgRunup), tone: 1 },
+    { label: $t('analysis.avgMae'), value: signed(s.avgMae), tone: -1 },
+    { label: $t('analysis.avgHold'), value: duration(s.avgHoldMs) },
+    { label: $t('analysis.avgPnlPct'), value: s.avgPnlPct == null ? '—' : `${signed(s.avgPnlPct)}%`, tone: s.avgPnlPct }
   ]);
 
   // ── Profits and losses, by side ──
@@ -67,9 +67,9 @@
   );
   const bars = $derived(
     [
-      { key: 'all', label: $t('histviz.quick.allSides'), d: by.all },
-      { key: 'long', label: $t('histviz.quick.long'), d: by.long },
-      { key: 'short', label: $t('histviz.quick.short'), d: by.short }
+      { key: 'all', label: $t('analysis.allSides'), d: by.all },
+      { key: 'long', label: $t('analysis.long'), d: by.long },
+      { key: 'short', label: $t('analysis.short'), d: by.short }
     ].filter((r) => r.key === 'all' || r.d.trades > 0)
   );
 
@@ -87,9 +87,9 @@
     {#if open}
       <!-- The live position sits with the numbers it will change once it is closed. -->
       <div class="head live">
-        <span class="lbl">{$t('histviz.quick.openPosition')}</span>
+        <span class="lbl">{$t('analysis.openPosition')}</span>
         <b class="val" class:up={live > 0} class:down={live < 0}>{signed(live)}</b>
-        <span class="sub">{open.dir > 0 ? $t('histviz.quick.long') : $t('histviz.quick.short')} {num(open.qty, 6)}</span>
+        <span class="sub">{open.dir > 0 ? $t('analysis.long') : $t('analysis.short')} {num(open.qty, 6)}</span>
       </div>
     {/if}
     {#each heads as x (x.label)}
@@ -102,7 +102,7 @@
   </div>
 
   <section>
-    <h4>{$t('histviz.quick.performanceAnalysis')}</h4>
+    <h4>{$t('analysis.performanceAnalysis')}</h4>
     <div class="cells">
       {#each perf as x (x.label)}
         <div class="cell" title={x.title ?? ''}>
@@ -114,7 +114,7 @@
   </section>
 
   <section>
-    <h4>{$t('histviz.quick.profitsLosses')}</h4>
+    <h4>{$t('analysis.profitsLosses')}</h4>
     <ul class="pl">
       {#each bars as r (r.key)}
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -140,29 +140,29 @@
         <div class="tip" style:left="{tip.x}px" style:top="{tip.y}px" aria-hidden="true">
           <span class="t-ttl">{tip.row.label}</span>
           <span class="t-row">
-            <i>{$t('histviz.quick.grossProfit')}</i><b class="up">{signed(tip.row.d.grossWin)}</b>
+            <i>{$t('analysis.grossProfit')}</i><b class="up">{signed(tip.row.d.grossWin)}</b>
           </span>
           <span class="t-row">
-            <i>{$t('histviz.quick.grossLoss')}</i><b class="down">{signed(-tip.row.d.grossLoss)}</b>
+            <i>{$t('analysis.grossLoss')}</i><b class="down">{signed(-tip.row.d.grossLoss)}</b>
           </span>
           <span class="t-row net-row">
-            <i>{$t('histviz.quick.netPnl')}</i>
+            <i>{$t('analysis.netPnl')}</i>
             <b class:up={tip.row.d.pnl > 0} class:down={tip.row.d.pnl < 0}>{signed(tip.row.d.pnl)}</b>
           </span>
           <span class="t-row">
-            <i>{$t('histviz.quick.trades')}</i><b>{tip.row.d.trades}</b>
+            <i>{$t('analysis.trades')}</i><b>{tip.row.d.trades}</b>
           </span>
           <span class="t-row">
-            <i>{$t('histviz.quick.winRate')}</i><b>{pct(tip.row.d.winRate)}</b>
+            <i>{$t('analysis.winRate')}</i><b>{pct(tip.row.d.winRate)}</b>
           </span>
         </div>
       {/if}
     </ul>
     <div class="streaks">
-      <span>{$t('histviz.quick.winStreak')} <b class="up">{runs.maxWins}</b></span>
-      <span>{$t('histviz.quick.lossStreak')} <b class="down">{runs.maxLosses}</b></span>
+      <span>{$t('analysis.winStreak')} <b class="up">{runs.maxWins}</b></span>
+      <span>{$t('analysis.lossStreak')} <b class="down">{runs.maxLosses}</b></span>
       <span>
-        {$t('histviz.quick.currentStreak')}
+        {$t('analysis.currentStreak')}
         <b class:up={runs.current > 0} class:down={runs.current < 0}>
           {runs.current > 0 ? `+${runs.current}` : runs.current}
         </b>
@@ -170,7 +170,7 @@
     </div>
   </section>
 
-  <QuickDist {trades} {s} />
+  <TradeDist {trades} {s} />
 </div>
 
 <style>

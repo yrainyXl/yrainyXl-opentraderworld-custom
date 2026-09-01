@@ -25,6 +25,8 @@ static CAP: Capability = Capability {
     timeframes: &["1m", "5m", "15m", "1h", "4h", "1d", "1w"],
     adjusted: false,
     max_bars_per_req: 720,
+    // ~1 req/s sustained is the documented ceiling.
+    min_interval_ms: 1100,
     searchable: true,
 };
 

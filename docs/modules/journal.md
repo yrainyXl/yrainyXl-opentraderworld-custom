@@ -1,6 +1,6 @@
 # Trading Journal
 
-Log every trade, in any currency, and get honest performance stats: equity curve, win rate, expectancy, profit factor, drawdown, Sharpe and more. The journal is organized in eight tabs: **Breakdown**, **PnL Calendar**, **Trades**, **Strategies & capital**, **Templates**, **Fees & currency**, **Import**, **Pending tasks**.
+Log every trade, in any currency, and get honest performance stats: equity curve, win rate, expectancy, profit factor, drawdown, Sharpe and more. The journal is organized in ten tabs: **Breakdown**, **Analytics**, **PnL Calendar**, **Trades**, **Strategies & capital**, **Tags**, **Templates**, **Fees & currency**, **Import**, **Pending tasks**.
 
 ## Categories
 
@@ -43,11 +43,28 @@ If a rate can't be fetched for some date, those trades are **excluded from conve
 
 ## Breakdown (your stats)
 
-Per category or across all, filterable by date range, ticker, side, asset class, strategy and signal:
+Per category or across all, filterable by date range, ticker, side, asset class, strategy, signal and tag. The filter bar is shared with Analytics, so a scope set on one screen is the scope of the other, and the ticker list offers the symbols the journal actually holds:
 
 - **Equity curve** in the display currency.
-- Realized PnL · Return · Win rate · Trades (closed/open) · Expectancy · Profit factor · Avg win / Avg loss · Best / Worst trade · Max drawdown · Sharpe · Total fees · Invested capital · Margin deployed · Return on margin.
+- Realized PnL · Return · Win rate · Trades (closed/open) · Expectancy · Profit factor · Avg win / Avg loss · Best / Worst trade · Max drawdown · Sharpe and Sortino · Total fees · Invested capital · Margin deployed · Return on margin.
+- **Sharpe and Sortino** are computed on daily returns against the equity carried into each day, annualized, the same definition Analytics uses, so the two screens agree.
 - **Calendar view**: a month-grid heatmap of daily PnL, green for up days and red for down, with weekly totals down the side. Click any day to jump to that day's trades.
+
+## Analytics (reading the book)
+
+The whole book in five views, over the same filters as the Breakdown:
+
+- **Overview**: expectancy in **R** and total R (over the trades that carry a planned stop), risk per trade, Sharpe with Sortino beside it, max drawdown with the days spent below the peak, trading days won and lost, average day, current and best streak, then the **R distribution** and the cost of your tagged mistakes.
+- **Distributions**: net PnL by holding time, entry hour, entry weekday and position size, and the trade count per profit bucket. Which hour of your day actually pays.
+- **Breakdown**: performance grouped by strategy, symbol, tag, asset class or side, with trades, win rate, net, expectancy, avg R and profit factor per row.
+- **Compare**: this day, week, month, quarter, year or a custom range against the one just before, row by row (net, trades, win rate, expectancy, avg R, profit factor, max drawdown, fees, trading days), above a strip of the last twelve periods.
+- **Scatter**: any two trade values plotted against each other (date, trade number, net, cumulative PnL, return on notional, R, holding time, size...), coloured by result, side, strategy, ticker or asset class, with a trend line and zoom.
+
+Closed trades with no FX rate for their date are counted out loud rather than silently dropped.
+
+## Discipline tags
+
+A **tag** is a rule you broke or honoured: *moved my stop*, *no setup*, *sized up after a loss*. Tick them on the trades where they apply and Analytics prices them: how many closed trades broke a rule, what those trades average against the clean ones, and the gap between the two. That is the **cost of mistakes**, in money.
 
 ## Import a trade book
 

@@ -109,8 +109,8 @@ async fn remove(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct PositionBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct PositionBody {
     position: f64,
 }
 

@@ -22,7 +22,19 @@ Pick provider, asset type, timeframe, ticker and date range, then **Download**. 
 - **Options** are built from underlying, expiry, call/put and strike.
 - **Intraday limits**: providers only serve intraday granularity for a limited lookback (e.g. ~7, 60 or 730 days depending on provider). Older history is available at **1d / 1w** without limit. The form warns you before you queue an impossible range.
 
-Downloads run as background **jobs**, chunk by chunk, with live progress. Filter jobs by status, provider, timeframe or ticker.
+### Several at once
+
+One form queues a whole batch: tick **as many timeframes** as you need and type **several tickers separated by commas** (`BTCUSDT, ETHUSDT, SOLUSDT`). One download is queued per symbol × timeframe pair (3 symbols × 2 timeframes = 6 downloads), all on the same connector and the same date range.
+
+Before you press Download, the form **prices the batch**: how many downloads it is, roughly how many provider requests that costs, and the minimum time it will take (they run one after another to respect the provider's rate limits). When the connector carries a [request limit](/config/connectors#request-limits), a small gauge shows how much of the current window is already spent, and the line warns you when the batch goes past it. It is not blocked: the rest waits for the quota to reset and resumes on its own.
+
+### Watching the jobs
+
+Downloads run as background **jobs**, chunk by chunk, with live progress. Filter jobs by status, provider, timeframe or ticker; a batch is grouped under one header showing how many of its downloads are done.
+
+- **A job that hit a limit is `waiting`, not failed.** The row says why (*quota reached* or *provider rate limit*) and counts down to the moment it resumes by itself.
+- **Cancel** stops any unfinished job, and one click cancels **the rest of a batch**. Cancelling is cooperative: the worker stops at the next chunk boundary and the bars already written are kept.
+- A long park and the end of a batch raise a notification, pushed to the [channels](/config/settings#notifications) Historical Data has been granted.
 
 ### Datasets
 
@@ -67,6 +79,14 @@ Live is addressed by instrument, not by dataset, and **stores nothing**: any sym
 - **Navigation is hand-driven**: drag to pan both axes (time sideways, price up and down), wheel to zoom (calibrated per device, so a mouse notch and a trackpad tick move the same amount). Changing chart type keeps the current zoom.
 - **Volume** is drawn at the bottom of the price pane, the way market terminals draw it, rather than in a pane of its own. Plus a single fullscreen mode.
 - **Micro-cap prices** are written `0.0₅4549`, the subscript counting the zeros, instead of a scale of identical `0.0000` labels.
+
+### Custom indicators on the chart
+
+The indicator dialog has a second tab: **Custom**. It holds the same node-graph library the [Backtest](#expert-mode) module builds from, so an indicator exists **once** and both modules see the same definition. Pick one from the list to plot it, or build a new one right here with the same builder; saving writes it back to the shared library.
+
+Unlike a catalog indicator, a custom one **chooses its own pane**: on the price, or in a pane of its own. That choice is yours per instance, so the same indicator can overlay the candles on one chart and sit below them on another. A 0-100 indicator drawn as an overlay gets a hidden second scale, so it cannot flatten the price.
+
+The definition **travels with the instance**: a chart still draws its custom indicator after the library row is deleted, and reloading refreshes it from the library while the row exists.
 
 ### Drawing tools
 
@@ -147,6 +167,27 @@ Add several datasets and run one strategy across all of them on a **merged clock
 
 A ladder of price levels between a lower and upper bound; each cell buys low and sells at the next level up, **long**, **short** or **neutral**. Size a fixed quantity per level or split a total budget across cells, with optional stops above/below the ladder. Results report fills, round trips and end inventory.
 
+### DCA (savings plan)
+
+A third mode next to signal rules and the grid, for the way most money is actually invested: a **weighted basket**, bought over time, never rebalanced.
+
+- **Weights, fixed.** Every euro deployed is split by the weights you set per ticker. Nothing is rebalanced, so a rule that fires on one asset of five deploys that asset's own share.
+- **Money in.** The starting capital is bought in one shot at each asset's first bar. Everything after it is **new money**: a recurring contribution (per bar, day, week, month, quarter or year, invested on arrival or kept as cash), and buy rules that pay an amount in when their condition holds.
+- **Buy rules**: a fixed amount, a % of cash, of the portfolio or of the cost basis, with a maximum number of fires and a cooldown, filled at the next bar's open.
+- **Sell rules**: a % of the position, the whole position, a number of units or an amount, triggered by a **gain objective**, a condition, or both, with the proceeds kept as cash or withdrawn.
+- **Conditions** are the engine's ordinary rule groups plus two families written for this mode: **market metrics** (drop from the high, rise from the low, change over N bars, change since the start) and the **live position** (P&L %, drift since the last buy, average cost, units, value, weight %, cash %, drawdown). They are evaluated on a **weighted basket index** by default, or per asset, which then buys only the assets that hold.
+- **Measures for a savings plan**, not for a strategy: drawdown and Sharpe on the **deposit-adjusted (time-weighted)** curve, so a deposit is not read as a rally; return on the money in; **IRR** for the money-weighted return; and a benchmark of the same total contributed deployed in one lump sum at the start.
+
+Sizing, pyramiding and stops do not apply here: the plan's own rules decide every fill.
+
+### Trading window
+
+A **Filters** step decides *when* the strategy may open, on a fixed UTC offset you choose (no daylight saving, which is what an exchange session rule means):
+
+- **Weekdays** and **sessions** (several per day, an end before its start wraps past midnight).
+- **Calendar**: trade only on given dates, or never on them. *Never* wins over *only*.
+- Outside the window the position is either **kept** or **closed**, and pyramiding adds can be blocked too. Entries are gated; exits, stops and take-profits keep running on every bar.
+
 ### Costs & execution realism
 
 - **Slippage**: a fixed number of ticks or a percent of price, applied to every fill.
@@ -159,7 +200,7 @@ A ladder of price levels between a lower and upper bound; each cell buys low and
 A full-screen builder for power users:
 
 - **Named strategies**: save, search, duplicate and edit full strategy configurations.
-- **Custom indicators**: build your own from named steps, no code. Each step either applies a built-in indicator to a **source** (a price field or the output of an earlier step) or computes a **formula** referencing earlier steps by name (`@volume / SMA(@volume)`, with `+ − × ÷`, `min`, `max`, `abs`, `clamp`). This lets you chain indicators: a Hull MA of an RSI, a MACD of an RSI, a smoothed volume ratio, and so on. Indicators that read full candles (ATR, Stochastic, ADX, VWAP…) only apply to the price, not to a derived step. The highlighted step(s) are the output. Custom indicators become operands in the rule editor alongside the built-ins.
+- **Custom indicators**: build your own from named steps, no code. Each step either applies a built-in indicator to a **source** (a price field or the output of an earlier step) or computes a **formula** referencing earlier steps by name (`@volume / SMA(@volume)`, with `+ − × ÷`, `min`, `max`, `abs`, `clamp`). This lets you chain indicators: a Hull MA of an RSI, a MACD of an RSI, a smoothed volume ratio, and so on. Indicators that read full candles (ATR, Stochastic, ADX, VWAP…) only apply to the price, not to a derived step. The highlighted step(s) are the output. Custom indicators become operands in the rule editor alongside the built-ins, and the library is **shared with the chart**, which draws the same definition ([Custom indicators on the chart](#custom-indicators-on-the-chart)).
 - **Searchable indicator picker**: pick indicators from a grouped, type-to-filter list (in both the rule editor and the custom-indicator builder) instead of scrolling one long dropdown.
 
 ### Date windows and parameter sweeps (API)
@@ -171,6 +212,16 @@ Two capabilities live on the API rather than in the form. They exist for the [as
 
 A sweep also returns a **deflated Sharpe**: the Sharpe the best of N *worthless* strategies would be expected to reach, given how much these particular trials varied. Compare the winner against that bar, not against zero: on real daily bars, the best of eight moving-average crossovers scoring 0.59 against a selection bar of 0.70 means *no evidence of an edge*, which the maximum alone would have hidden.
 
+### Optimizer
+
+Take a finished run and **vary its parameters**: indicator lengths and thresholds per side, stops, sizing, costs, portfolio limits, grid settings, and which weekdays to exclude (every subset is tried). Each parameter gets a from / to / step, and the header counts the variants as you widen them, capped so a grid stays finite.
+
+- **Before it starts**, it estimates the cost from what past runs measured on your machine: milliseconds per variant, workers, total time. You can stop at any point and keep what has been computed.
+- **Ranking** on the metric you pick (Sharpe, Sortino, return, profit factor, win rate, expectancy, max drawdown, trades, out-of-sample return); any column re-sorts afterwards.
+- **Analysis** shows the spread of the chosen metric across every variant: worst, average, best, and how many came out positive. A single good number means little if its neighbours are terrible.
+- **Multiple-testing haircut**: the best Sharpe is shown against the **selection bar**, the Sharpe the best of that many *worthless* strategies would be expected to reach. Below the bar, trying this many variants is enough to explain the winner.
+- Click a variant to read its **full backtest**, replayed from its own settings. Nothing is stored until you **keep** it in the history.
+
 ### Out-of-sample split
 
 Split the data into an **in-sample** head and an **out-of-sample** tail; the strategy runs on both and the two stat blocks (return, profit factor, win rate, max drawdown, trades) are shown side by side. A large gap between the columns is a sign of overfitting.
@@ -180,7 +231,7 @@ Split the data into an **in-sample** head and an **out-of-sample** tail; the str
 - Headline stats: return (vs **buy & hold**), net PnL and fees, win rate, profit factor, expectancy, max drawdown, Sharpe/Sortino.
 - **Equity curve** overlaid on price with entry/exit markers.
 - A full **performance summary** (gross profit/loss, payoff ratio, largest win/loss, max consecutive wins/losses, average bars in trade…) and the complete **list of trades** with per-trade **MAE/MFE** (worst open loss / best open profit while in the trade), filterable, and exit reasons (signal faded, exit signal, stop-loss, take-profit, reversed, data end).
-- **Save runs** by name and keep a history to compare strategies later; each saved run has a downloadable **Markdown report**.
+- **Save runs** by name and keep a history to compare strategies later. The **Reports** menu of a finished run exports it whole, per side and per asset: a **PDF** with every chart, or **Markdown** with the figures alone. Neither carries the trade list; the file is named after the strategy and the moment it was exported.
 
 ## Quant Tools {#quant}
 
@@ -197,6 +248,13 @@ Select 2+ datasets with the same timeframe:
 - **Correlation matrix**: are you diversifying, or buying the same asset twice?
 - **Efficient frontier**: a cloud of random allocations; click the highlighted **max-Sharpe** or **min-volatility** points to read their weights.
 - **Risk parity**: weights that size volatile assets smaller so no single name dominates risk.
+
+Mixing asset classes is fine, including different providers: bars are matched by the **period** they belong to, not by the timestamp the provider stamped them with (a daily crypto candle opens at 00:00 UTC, a US equity one at the New York session start, and both are the same day). Two things follow, and the panel says which one applied:
+
+- A basket that mixes a 24/7 market with an exchange-hours one is measured **weekly**. Aligned daily, the weekend move of the continuous asset would land on the same row as the other's Monday and understate how much they really move together.
+- Annualization is **counted on the clock** rather than assumed: the same daily datasets are 252 periods a year on an exchange and 365 on a 24/7 market.
+
+Intraday datasets are the exception: 4h bars anchored on a trading session and 4h bars anchored on the clock are 90 minutes apart, so a mixed-provider intraday basket is refused rather than approximated. Use daily datasets, or one provider for the whole basket.
 
 ### Position Size
 

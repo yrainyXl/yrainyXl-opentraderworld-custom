@@ -82,6 +82,13 @@ export const notifStore = {
     toasts = [];
   },
 
+  /** Delete everything (the bell and the toasts go with it). */
+  async clearAll() {
+    await remindApi.clearAll();
+    unread = 0;
+    toasts = [];
+  },
+
   /** Reflect a single notification being marked read elsewhere (e.g. the page). */
   noteRead() {
     if (unread > 0) unread -= 1;

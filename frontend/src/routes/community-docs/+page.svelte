@@ -1110,6 +1110,64 @@
     margin: var(--space-3) 0;
     color: var(--muted);
   }
+  .content :global(img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius);
+  }
+  .content :global(figure) {
+    margin: var(--space-4) 0;
+  }
+  .content :global(figcaption) {
+    margin-top: var(--space-1);
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.4;
+  }
+  /* Video embed: the poster is stored with the doc, the anchor opens the video on the
+     provider's own site. Nothing is fetched when the doc is read, so it works offline. */
+  .content :global(.otw-video) {
+    max-width: 640px;
+  }
+  .content :global(.otw-video a) {
+    position: relative;
+    display: block;
+    line-height: 0;
+    overflow: hidden;
+    border-radius: var(--radius);
+    text-decoration: none;
+  }
+  .content :global(.otw-video img) {
+    display: block;
+    width: 100%;
+    border-radius: 0;
+  }
+  .content :global(.otw-video a:has(img)::before) {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 62px;
+    height: 42px;
+    transform: translate(-50%, -50%);
+    border-radius: 10px;
+    background: rgba(17, 17, 17, 0.72);
+    transition: background 0.15s ease;
+  }
+  .content :global(.otw-video a:has(img)::after) {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-38%, -50%);
+    border-style: solid;
+    border-width: 9px 0 9px 15px;
+    border-color: transparent transparent transparent #fff;
+  }
+  .content :global(.otw-video a:hover:has(img)::before) {
+    background: rgba(196, 32, 32, 0.92);
+  }
+
   .star.on :global(svg) {
     fill: currentColor;
   }

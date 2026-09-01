@@ -11,6 +11,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Watchlists: China Market (A-share/CNY) rows follow the domestic convention — 涨红跌绿 — in the quotes table, sparklines and the dashboard widget; all other markets keep 涨绿跌红, and 0 stays neutral.
 - Portfolio Tracker: A-shares can be searched, added (provider `china`, operations in CNY) and priced through the China Market connector (cn-market) — same integration Watchlists uses; CNY quotes are converted to USD via the journal FX rates, and CNY portfolios/assets follow 涨红跌绿. Yahoo/CoinGecko pricing is untouched.
 
+## [0.0.9] - 2026-08-30
+
+### Added
+- Editor: a **video** block turns a YouTube or Vimeo link into a thumbnail and a link, so a document carries a video without carrying its weight.
+- **Automator**: a new module stacks tasks in a grid of steps, calls your own API or any URL, asks an AI step, and notifies, by hand or on a schedule.
+- Automator: every run is kept step by step, with the request and the answer of each block, so a workflow that failed at 3 a.m. says which block failed and why.
+- Automator: schedules run in a real timezone, skip an occurrence while the previous run is still going, and can catch up once after the app was down.
+- Automator: the editor **saves on its own** and every edit can be undone or redone, with a block still being filled in kept as a draft the schedules ignore.
+- Automator: a workflow card runs the workflow now, and pauses or resumes its schedule from the list.
+- Automator: a test run executes the reads and reports what each write would have done, including the blocks that were only waiting on one, and a block that failed hands its error message to the next one.
+- Backtest: a **DCA** mode simulates a savings plan, a weighted basket bought with the starting capital, a recurring contribution and conditional tranches, sold on an objective or a signal, with fees.
+- Backtest: conditions can read a market metric (drop from the high, rise from the low, change over N bars) and, in a DCA plan, the live position (P&L %, drift since the last buy, weight, cash).
+- Backtest: the exported report carries the whole result, the PDF with every chart and the Markdown with the figures alone, per side and per asset, and never a trade list.
+- Backtest: an exported report is named after the strategy it came from and the moment it was exported.
+- Backtest: an Optimizer varies the parameters of a finished run (indicator lengths, thresholds, stops, sizing, weekdays to exclude), tells you how many variants that is and how long it will take before starting, then ranks them on a page you can stop and read at any point.
+- Backtest: a Filters step decides when the strategy may open, by session hours on a chosen UTC offset, by weekday and by date, holding or closing the position once the window shuts.
+- Backtest: a finished run takes the whole screen and gains the chart's analysis views: statistics by side, streaks, return distribution, and a cumulative P&L curve with its drawdown.
+- Backtest: a grid can follow a moving line (SMA, EMA, DEMA, TEMA, WMA, HMA, VWAP) with its band set in % or in ATR, and can be rebuilt at every candle close.
+- Backtest: clicking a trade in the list frames it on the chart, on its own asset for a portfolio run, zoomed from the trade's own length.
+- Backtest: the per-asset tab reads one asset at a time, with the same statistics and P&L curve the whole run gets.
+- Backtest: the Run button fills as the run works, paced by what past runs of that kind measured on your machine.
+- Backtest: a DCA run reads what the plan holds at the last bar (units, average cost, value, weight against target, invested, realized, unrealized, fees) with its fill list, in the result tabs and in the report.
+- Dashboard: the **Modules** page is a real page you can edit, seeded by section (markets and data, trading, wealth, information, productivity, automation and AI) and reconciled with the modules you install.
+- Journal: an **Analytics** view reads the whole book, statistics by side, streaks, profit distribution, equity curve and drawdown, discipline tags and the planned stop, with the breakdown filtered by ticker.
+- Chart: TEMA, rolling VWAP, SuperTrend and ADX join the indicator catalog.
+- Historical data: one download form queues several series at once, several timeframes and several symbols separated by commas, and prices the batch in provider requests before it starts.
+- Historical data: a download that runs into the provider's quota or rate limit waits and resumes on its own, showing why and for how long, and any job or whole batch can be cancelled.
+- AI agents: an access token can be given an expiry date, after which it stops working everywhere.
+- AI agents: an agent can list the parameters a strategy can sweep and drive the Optimizer, and reaches the journal CSV export and cross-module search.
+- AI agents: an agent granted the Automator can read your workflows, create one, write its graph and test it, while putting one into service stays yours: its graph arrives as a draft you adopt from the editor, and it can neither attach a workflow's access token nor run one.
+- Notifications: a channel destination (a Telegram chat id, for instance) can be plugged from the vault instead of being typed in clear.
+- RemindMe: "Clear all" empties the whole notification history, behind a confirmation since it cannot be undone.
+- Vault: a secret value is revealed while you hold the eye down, and hidden again as soon as you let go.
+
+### Changed
+- Quant: a basket mixing a 24/7 market with an exchange one is measured weekly, and annualization counts the periods the data really holds instead of assuming 252 a year.
+- Backtest: a run is drawn on the full visualization chart with the strategy's indicators, over a split you drag between chart and statistics, either side closing fully with a banner to reopen it.
+- Backtest: the dock of past runs is dragged to any height from its top edge and clicked shut, and the two exports of a finished run sit under one Reports menu.
+- Backtest: a single full-screen builder, five steps to walk or jump between, runnable as soon as a dataset is picked, above a dock of past runs and saved strategies searched by name or tag.
+- Backtest: a DCA run tracks the proceeds taken out when it sells, separates realized from unrealized in the trade table, and compares against the same money in deployed at the start rather than a buy and hold.
+- Backtest: a denser strategy form, with one density control for the whole builder.
+- Journal: the trades list shows entry and exit times, and the quantity of an advanced trade sums its entry legs instead of showing an average price.
+- UI: a modal keeps its title and its buttons in view while its content scrolls.
+- AI agents: an agent runs a backtest or a risk calculation without asking you to approve it, since it stores nothing; only real writes still prompt.
+- AI agents: mail and feed articles now reach an agent labelled as outside content, so instructions hidden inside them are ignored.
+
+### Fixed
+- Backtest, Quant: datasets from different providers line up on the same period, so a crypto series and an equity one can be measured or backtested together instead of never meeting.
+- Community docs: pictures, diagrams, highlights and checklists published on the website now arrive whole in the app instead of vanishing when the library syncs.
+- Community docs: a document submitted for publication is refused when one of its images is linked from another site, so a published doc always reads offline.
+- Backtest DCA: the return, Sharpe, Sortino and drawdown of a savings plan no longer count the month's contribution as a gain of the money already invested.
+- Backtest: position sizing now accounts for the contract multiplier, so futures and CFD strategies sized by % of equity, risk, Kelly or equity tiers get the size they asked for.
+- Backtest: a stop hit by a candle that gapped past it now fills at that candle's open instead of at the stop price, so gap losses are reported.
+- Backtest: maximum exposure limits now count the position being opened, instead of allowing one full position past the cap.
+- Backtest: breakeven trades no longer count as wins, so the win rate and streaks match the exported report.
+- Backtest: profit factor and Sharpe no longer rank a flawless or perfectly smooth variant at the wrong end of an Optimizer ranking.
+- Backtest: the out-of-sample split now credits a trade to the period it closed in, so a position held across the split is no longer reported as zero out-of-sample return.
+- Backtest: the sweep verdict on a result now reflects how long the tested history is and its timeframe.
+- Backtest: reloading the page comes back on the finished result, figures already there, while the trades and curves are recomputed behind a skeleton; leaving the module still clears it.
+- Journal: Sharpe in the breakdown is now the annualized daily figure shown in analytics, with Sortino beside it, so the two screens agree.
+- Notifications: a long line in a notification (a list of tickers) now wraps inside its card instead of running past it.
+- Search: the results panel no longer closes itself while you are still searching, whether you toggle deep search, type after dismissing it once, or click its clear button.
+- UI: a field inside a bordered box (a tag box, a combo, an input group) no longer draws a second frame inside the first.
+- UI: the grab handle between the chart and the panel below it is visible instead of blending into the border.
+- UI: the Appearance settings read in your own language instead of English.
+
+
 ## [0.0.8] - 2026-08-16
 
 ### Added
@@ -23,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Watchlists: **price alerts** per symbol — a level, or a move in % or $ measured from now or over a rolling window — firing on the server even with the page closed, to the notification channels you pick per alert.
 - Portfolio tracker: the description is editable after creation, next to a foldable **investment thesis** note kept with the portfolio.
 - Portfolio tracker: import an operations ledger from any broker export or spreadsheet — columns are detected, you say what each symbol is, and each import is one revertible batch, de-duplicated per portfolio.
+- Journal: a Scatter tab plots one dot per trade, with the two axes and the colouring picked from the trade's own values (PnL, R, holding time, size, hour, price), a trend line and its correlation.
+- Journal: analytics distributions gain a profit-per-trade histogram, with the bucket width picked on the chart (automatic, or 1 to 1000).
 - Journal: import a trade book from any broker export, journal or spreadsheet (CSV/TSV/JSON) — columns, delimiter, decimal and date conventions are detected, and unidentified columns stay unmapped rather than guessed.
 - Journal: the import previews real trades before writing anything, cross-checks the file's own P&L against the computed one, and re-renders on every mapping edit.
 - Journal: rows can be round trips or executions; fills are grouped per instrument into positions, and what stays open at the end is imported as an open trade.
@@ -242,7 +311,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.1] - 2026-07-06
 
-[Unreleased]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.8...HEAD
+[Unreleased]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.9...HEAD
+[0.0.9]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/G-OTW/OpenTraderWorld/compare/v0.0.5...v0.0.6

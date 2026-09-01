@@ -4,9 +4,14 @@
   import { fmtNum } from './api.js';
   import { t } from '$lib/i18n';
 
-  let { stats = {} } = $props();
+  // `dca` renders the plan variant: a savings plan is long-only accumulation, so a Long
+  // column identical to All and an empty Short one are three columns saying one thing.
+  let { stats = {}, dca = false } = $props();
 
-  const scopes = $derived([stats.all ?? {}, stats.long ?? {}, stats.short ?? {}]);
+  const scopes = $derived(dca ? [stats.all ?? {}] : [stats.all ?? {}, stats.long ?? {}, stats.short ?? {}]);
+  // The engine reports a finite stand-in instead of an infinite profit factor so it can sort
+  // and serialize. A plan whose only sell rule is a profit objective hits it every time.
+  const NO_LOSS = 1e9;
 
   // fmt: currency-ish number (signed tint), pct, ratio, int, bars
   const ROW_DEFS = [
@@ -30,7 +35,15 @@
     { labelKey: 'backtest.perf.maxConsecLosses', key: 'max_consec_losses', fmt: 'int' },
     { labelKey: 'backtest.perf.avgBarsInTrade', key: 'avg_bars_held', fmt: 'bars' }
   ];
-  const ROWS = $derived(ROW_DEFS.map((r) => ({ ...r, label: $t(r.labelKey) })));
+  // The fee row of this table is the fee carried by the closed trades. In a savings plan
+  // most fills never close, so the label has to say which total it is.
+  const ROWS = $derived(
+    ROW_DEFS.map((r) => ({
+      ...r,
+      label:
+        dca && r.key === 'total_fees' ? $t('backtest.perf.feesOnClosed') : $t(r.labelKey)
+    }))
+  );
 
   function cell(scope, row) {
     const v = scope[row.key];
@@ -45,6 +58,7 @@
       case 'pct':
         return { text: `${fmtNum(v)}%`, tone: 0 };
       case 'ratio':
+        if (v >= NO_LOSS) return { text: $t('backtest.perf.noLoss'), tone: 1 };
         return { text: fmtNum(v), tone: v === 0 ? 0 : Math.sign(v - 1) };
       case 'int':
         return { text: fmtNum(v, 0), tone: 0 };
@@ -61,9 +75,13 @@
     <thead>
       <tr>
         <th class="metric">{$t('backtest.perf.metric')}</th>
-        <th>{$t('backtest.perf.all')}</th>
-        <th><span class="dot long"></span>{$t('backtest.side.long')}</th>
-        <th><span class="dot short"></span>{$t('backtest.side.short')}</th>
+        {#if dca}
+          <th>{$t('backtest.perf.realized')}</th>
+        {:else}
+          <th>{$t('backtest.perf.all')}</th>
+          <th><span class="dot long"></span>{$t('backtest.side.long')}</th>
+          <th><span class="dot short"></span>{$t('backtest.side.short')}</th>
+        {/if}
       </tr>
     </thead>
     <tbody>

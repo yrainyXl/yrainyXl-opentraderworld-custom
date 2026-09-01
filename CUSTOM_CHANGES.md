@@ -78,6 +78,19 @@
 - **如何验证**：A 股上涨行显示红色、下跌行绿色；美股/加密行仍为绿涨红跌。
 - **如何回滚**：还原前端格式函数中的 CN 分支判定。
 
+### C-006 v0.0.9 升级（2026-09-01）
+
+- **修改原因**：从官方基线 v0.0.8 升级到 v0.0.9（Automator 模块、Backtest DCA/Optimizer、Editor 视频块、histdata rate-limit 等）。
+- **升级路径**：`vendor/upstream` 线性化 —— synthetic v0.0.9（`85f25a7350ca48bb4dfcf286b281012ff29babd8`，tree 与官方 v0.0.9 一致，parent = v0.0.8）；`custom/main` 三方 merge（merge base = v0.0.8）。merge commit：`<见 §8 执行记录>`。
+- **冲突与修复**：
+  - 冲突仅 `frontend/src/lib/i18n/en.json`、`zh.json`（保留 upstream Yahoo 新文案 + custom China 文案）。
+  - `core/otw-core/src/histdata/china.rs`：`Capability` 补 `min_interval_ms: 1_000`（upstream 新增字段，编译必修）。
+  - `CHANGELOG.md`：custom 条目移回独立 `[Unreleased]`（自动合并曾并入 `[0.0.9]`）。
+- **数据库 migration**：新增 upstream `0092–0097`（全部 additive + `IF NOT EXISTS`，无数据迁移）；custom `9000000100/101` 原值不变（checksum/installed_on 未动）。
+- **Upstream 潜在冲突点**：`histdata/mod.rs`（Capability/SUPPORTED_TIMEFRAMES）、`watchlists_api.rs`（ImportBody JsonSchema，与 custom china 逻辑无交集）。
+- **如何验证**：cargo check + tests（otw-store 34、otw-core 444 passed）+ frontend build + 冒烟（login/watchlist/portfolio/editor/automator 全链路 200）。
+- **如何回滚**：见 §8.2（DELETE 92–97 rows + 恢复 rollback image；旧 binary + 已应用 92–97 的 DB 会 VersionMissing 拒绝启动，必须同时回滚）。
+
 ### C-005 Docker / Rust 构建适配（国内网络 + BuildKit 缓存）
 
 - **修改原因**：`gcr.io`、`static.rust-lang.org`、`crates.io` 在服务器网络不稳定；同时要求后续 Rust 小改显著复用编译缓存，禁止反复冷启动 release build。
@@ -207,3 +220,12 @@ SQLx 0.9 启动校验（`sqlx-core` migrator.rs `validate_applied_migrations`）
   - 冲突仅 `frontend/src/lib/i18n/en.json`、`zh.json`（保留 upstream Yahoo 新文案 + custom China 文案）。
   - `histdata/china.rs` 需补 `min_interval_ms: 1_000`（upstream 给 `Capability` 新增字段）。
   - `CHANGELOG.md` 需把 custom 条目移回独立 `[Unreleased]`（自动合并会并入 `[0.0.9]`）。
+
+### 8.4 v0.0.9 升级执行记录（2026-09-01）
+
+- **vendor commit**：`85f25a7350ca48bb4dfcf286b281012ff29babd8`（synthetic v0.0.9，tree 与官方 `1ab52ad` 一致）。
+- **merge commit**：`5dbfc93f7f6c99d9c40a56dc48f3d0057f92dc2e`（custom/main merge vendor/upstream；冲突 2 个 i18n 文件已按 §8.3 解决）。
+- **数据库**：新 Core 启动时自动应用 `0092–0097`（installed_on `2026-09-01 14:12:46 UTC`，success=t）；`9000000100/101` checksum/installed_on 原值未变。
+- **镜像**：新 core `a5df3007…`（v0.0.9）；新 frontend `23fcd0d6…`；rollback tags `otw-core:rollback-pre-v0.0.9` / `otw-frontend:rollback-pre-v0.0.9`。
+- **备份**：`/opt/apps/backups/otw-db-pre-v0.0.9-20260901-220807.sql`（136M）。
+- **验证**：cargo check ✓、otw-store 34 tests ✓、otw-core 444 passed ✓、frontend build ✓、冒烟全链路 200（login/watchlist 601118+refresh/portfolio 601118 avg_cost 6.49 unrealized +60.0/editor create-patch-read-delete/automator workflows+schedules+catalog）。

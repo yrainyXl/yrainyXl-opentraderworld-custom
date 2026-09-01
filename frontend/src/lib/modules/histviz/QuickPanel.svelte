@@ -7,8 +7,8 @@
   import Table from '$lib/ui/Table.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
-  import QuickStats from './QuickStats.svelte';
-  import QuickCurve from './QuickCurve.svelte';
+  import TradeStats from '$lib/analysis/TradeStats.svelte';
+  import TradeCurve from '$lib/analysis/TradeCurve.svelte';
   import { t } from '$lib/i18n';
   import { stats, unrealized, SIZE_MODES } from './quicktest.js';
   import { makePriceFmt, priceDigitsOfValues } from './format.js';
@@ -66,7 +66,7 @@
     { key: 'exitAvg', label: $t('histviz.quick.exit'), numeric: true },
     { key: 'openTs', label: $t('histviz.quick.opened') },
     { key: 'closeTs', label: $t('histviz.quick.closed') },
-    { key: 'pnl', label: $t('histviz.quick.pnl'), numeric: true },
+    { key: 'pnl', label: $t('analysis.pnl'), numeric: true },
     { key: 'r', label: 'R', numeric: true },
     { key: 'act', label: '', width: '32px' }
   ]);
@@ -139,12 +139,12 @@
 
     <div class="chips">
       <span class="chip" class:up={total > 0} class:down={total < 0}>
-        {$t('histviz.quick.pnl')} <b>{fmtPnl(total)}</b>
+        {$t('analysis.pnl')} <b>{fmtPnl(total)}</b>
       </span>
-      <span class="chip">{$t('histviz.quick.trades')} <b>{s.trades}</b></span>
-      <span class="chip">{$t('histviz.quick.winRate')} <b>{s.winRate.toFixed(0)}%</b></span>
-      <span class="chip" title={$t('histviz.quick.rHint')}>
-        {$t('histviz.quick.avgR')} <b>{s.avgR == null ? '—' : s.avgR.toFixed(2)}</b>
+      <span class="chip">{$t('analysis.trades')} <b>{s.trades}</b></span>
+      <span class="chip">{$t('analysis.winRate')} <b>{s.winRate.toFixed(0)}%</b></span>
+      <span class="chip" title={$t('analysis.rHint')}>
+        {$t('analysis.avgR')} <b>{s.avgR == null ? '—' : s.avgR.toFixed(2)}</b>
       </span>
       {#if open}
         <span class="chip pos" class:short={open.dir < 0}>
@@ -202,7 +202,7 @@
               {#if col.key === 'side'}
                 <span class="side" class:short={row.dir < 0}>
                   <Icon name={row.dir > 0 ? 'arrow-up' : 'arrow-down'} size={11} />
-                  {row.dir > 0 ? $t('histviz.quick.long') : $t('histviz.quick.short')}
+                  {row.dir > 0 ? $t('analysis.long') : $t('analysis.short')}
                 </span>
               {:else if col.key === 'qty'}
                 {fmtQty(row.qty)}
@@ -234,9 +234,9 @@
             {/snippet}
           </Table>
         {:else if tab === 'stats'}
-          <QuickStats {s} {trades} {open} {live} />
+          <TradeStats {s} {trades} {open} {live} />
         {:else}
-          <QuickCurve {trades} />
+          <TradeCurve {trades} />
         {/if}
       </div>
     </div>
@@ -273,7 +273,7 @@
     height: 2px;
     transform: translateX(-50%);
     border-radius: 2px;
-    background: var(--border);
+    background: var(--accent);
   }
   .grip:hover::after,
   .grip:focus-visible::after,

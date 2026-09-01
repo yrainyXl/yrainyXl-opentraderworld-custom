@@ -8,6 +8,7 @@
   import { TaskList } from '@tiptap/extension-task-list';
   import { TaskItem } from '@tiptap/extension-task-item';
   import { ResizableImage as Image } from './ResizableImage.js';
+  import { VideoEmbed } from './VideoEmbed.js';
   import { CopyableCodeBlock } from './CopyableCodeBlock.js';
   import Link from '@tiptap/extension-link';
   import { TextStyle, Color, FontSize } from '@tiptap/extension-text-style';
@@ -18,7 +19,7 @@
   import { toggleCodeBlockMerged } from './code-block.js';
   import PromptModal from '$lib/ui/PromptModal.svelte';
   import Modal from '$lib/ui/Modal.svelte';
-  import { uploadFile, pickFile } from './files-api.js';
+  import { uploadFile, pickFile, resolveVideo } from './files-api.js';
   import { t } from '$lib/i18n';
 
   // props: content (ProseMirror JSON | null), onChange(json), titleSlot (snippet),
@@ -62,6 +63,7 @@
         TaskList,
         TaskItem.configure({ nested: true }),
         Image,
+        VideoEmbed,
         Link.configure({ openOnClick: false }),
         TextStyle,
         Color,
@@ -153,12 +155,19 @@
     if (text !== slash.query) slash = { ...slash, query: text };
   }
 
+  // The '/' and everything typed after it, as a range to delete before a command runs.
+  // Read it *synchronously* when the command is picked: a command that awaits (the video
+  // resolver calls the core) would otherwise read a caret the closing modal has already
+  // moved, and leave the query text behind in the document.
+  function slashRange() {
+    return { from: slashFrom - 1, to: editor?.state.selection.from ?? slashFrom };
+  }
+
   // Apply a slash command, removing the '/' and any typed query first.
-  function applyCommand(cmd, arg) {
+  function applyCommand(cmd, arg, range = null) {
     if (!editor) return;
     const chain = editor.chain().focus();
-    // Delete from the '/' (slashFrom - 1) through the current caret.
-    chain.deleteRange({ from: slashFrom - 1, to: editor.state.selection.from });
+    chain.deleteRange(range ?? slashRange());
     cmd.run(chain, arg).run();
   }
 
@@ -175,6 +184,31 @@
       } catch (e) {
         errorMsg = $t('editor.editor.imageUploadFailed', { message: e.message });
       }
+    } else if (cmd.video) {
+      // The core does the resolving: it recognises the provider, asks its oEmbed endpoint
+      // for the title and stores the thumbnail locally, so the block holds a link and a
+      // poster and no video bytes at all.
+      openPrompt({
+        title: cmd.label,
+        fields: [
+          {
+            key: 'url',
+            label: cmd.prompt,
+            placeholder: 'https://www.youtube.com/watch?v=…',
+            type: 'url',
+            required: true
+          }
+        ],
+        confirmLabel: $t('editor.editor.insert'),
+        onconfirm: async ({ url }) => {
+          const range = slashRange();
+          try {
+            applyCommand(cmd, await resolveVideo(url), range);
+          } catch (e) {
+            errorMsg = $t('editor.editor.videoEmbedFailed', { message: e.message });
+          }
+        }
+      });
     } else if (cmd.prompt) {
       openPrompt({
         title: cmd.label,
@@ -927,6 +961,56 @@
   :global(.prose .tiptap img.ProseMirror-selectednode) {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+  /* Video embed: a poster and a link, never a player. The play badge is drawn in CSS so
+     the block still reads as a video with nothing loaded from a third party. */
+  :global(.prose .tiptap .otw-video) {
+    margin: var(--space-4) 0;
+    max-width: 640px;
+  }
+  :global(.prose .tiptap .otw-video a) {
+    position: relative;
+    display: block;
+    line-height: 0;
+    overflow: hidden;
+    border-radius: var(--radius);
+    text-decoration: none;
+  }
+  :global(.prose .tiptap .otw-video img) {
+    display: block;
+    width: 100%;
+    border-radius: 0;
+  }
+  :global(.prose .tiptap .otw-video a:has(img)::before) {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 62px;
+    height: 42px;
+    transform: translate(-50%, -50%);
+    border-radius: 10px;
+    background: rgba(17, 17, 17, 0.72);
+    transition: background 0.15s ease;
+  }
+  :global(.prose .tiptap .otw-video a:has(img)::after) {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-38%, -50%);
+    border-style: solid;
+    border-width: 9px 0 9px 15px;
+    border-color: transparent transparent transparent #fff;
+  }
+  :global(.prose .tiptap .otw-video a:hover:has(img)::before) {
+    background: rgba(196, 32, 32, 0.92);
+  }
+  :global(.prose .tiptap .otw-video figcaption) {
+    margin-top: var(--space-1);
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.4;
   }
   :global(.prose .tiptap a) {
     color: var(--text);

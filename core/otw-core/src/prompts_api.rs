@@ -78,8 +78,8 @@ async fn update(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct VoteBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct VoteBody {
     /// 1 = up, -1 = down, 0 = clear.
     vote: i16,
 }
@@ -113,8 +113,8 @@ async fn versions(
     Ok(Json(json!({ "versions": versions })))
 }
 
-#[derive(Deserialize)]
-struct RollbackBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct RollbackBody {
     version: i32,
 }
 

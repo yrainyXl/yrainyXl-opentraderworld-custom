@@ -431,8 +431,8 @@ async fn delete_message(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct ReadAllBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct ReadAllBody {
     #[serde(default)]
     sender_id: Option<Uuid>,
 }
@@ -476,8 +476,8 @@ async fn unsubscribe(
     }
 }
 
-#[derive(Deserialize)]
-struct RemindBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct RemindBody {
     /// `YYYY-MM-DD`; defaults to today.
     #[serde(default)]
     date: Option<String>,

@@ -192,6 +192,37 @@ export const journalApi = {
   calendar: (filter = {}) =>
     req(`/journal/calendar${filterQs({ ...filter, tz_offset: new Date().getTimezoneOffset() })}`),
 
+  // ── Discipline tags (kind: mistake | rule | setup) ──
+  // A `mistake` tag is what turns "I over-traded again" into a number: the analytics
+  // endpoint prices the tagged trades against the ones logged without any breach.
+  listTags: () => req('/journal/tags').then((r) => r.tags),
+  addTag: (tag) =>
+    req('/journal/tags', { method: 'POST', body: JSON.stringify(tag) }).then((r) => r.tag),
+  updateTag: (id, patch) =>
+    req(`/journal/tags/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteTag: (id) => req(`/journal/tags/${id}`, { method: 'DELETE' }),
+
+  // Analytics — R-multiples, streaks, Sharpe/Sortino over trading days, hold-time /
+  // hour / weekday / size distributions, per-group tables and the cost of mistakes.
+  // Same filter set as breakdown; the tz offset buckets hours and days locally.
+  analytics: (filter = {}) =>
+    req(
+      `/journal/analytics${filterQs({ ...filter, tz_offset: new Date().getTimezoneOffset() })}`
+    ).then((r) => r.analytics),
+
+  // Period vs period — `period` is day | week | month | quarter | year | custom.
+  // `custom` compares the filter's own since/until against the same length just before,
+  // so no extra parameter is needed. Returns { current, previous, history }.
+  compare: (filter = {}, period = 'month', anchor = '') =>
+    req(
+      `/journal/compare${filterQs({
+        ...filter,
+        period,
+        anchor,
+        tz_offset: new Date().getTimezoneOffset()
+      })}`
+    ).then((r) => r.comparison),
+
   // Breakdown — accepts the same filter set as listTrades
   // ({ category_id, strategy_id, asset_class, side, ticker, signal_name, since, until }).
   breakdown: (filter = {}) => {
@@ -203,6 +234,10 @@ export const journalApi = {
     return req(`/journal/breakdown${q ? `?${q}` : ''}`).then((r) => r.breakdown);
   }
 };
+
+/** Tag kinds (mirror of the backend TAG_KINDS whitelist). The kind never changes the
+ * math, only how the stat reads: a mistake is a breach, a rule is a habit honoured. */
+export const TAG_KINDS = ['mistake', 'rule', 'setup'];
 
 /** Asset classes (mirror of the backend ASSET_CLASSES whitelist). */
 export const ASSET_CLASSES = [

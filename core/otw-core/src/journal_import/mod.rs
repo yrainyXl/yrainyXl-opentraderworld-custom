@@ -681,6 +681,8 @@ fn clone_input(t: &journal::TradeInput) -> journal::TradeInput {
         entries: t.entries.clone(),
         exits: t.exits.clone(),
         brackets: t.brackets.clone(),
+        stop_price: t.stop_price,
+        tags: t.tags.clone(),
     }
 }
 

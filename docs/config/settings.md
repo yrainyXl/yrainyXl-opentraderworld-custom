@@ -63,9 +63,11 @@ The shared list of market-data provider accounts used by Historical Data, Visual
 
 ## Notifications {#notifications}
 
-The shared list of **notification channels**: where the app is allowed to push, created once and reused by every module that notifies (RemindMe, Watchlist price alerts, Mailbox, Webhooks).
+The shared list of **notification channels**: where the app is allowed to push, created once and reused by every module that notifies (RemindMe, Watchlist price alerts, Mailbox, Webhooks, Historical Data downloads, Automator).
 
 A channel is a destination **you own**: an **email** account (your own SMTP server), a **Telegram** bot, or a **Slack** or **Discord** incoming webhook. Each holds one secret (SMTP password, bot token, webhook URL), typed here or plugged from the [Vault](#vault), sealed on save and never shown again.
+
+Some **non-secret** fields take a vault item too: the Telegram **chat id** is one, so a channel can be set up without that id sitting in clear in the config.
 
 - **Grants, per module.** Every channel names the modules allowed to send to it, or *all*. The check runs server-side: a module that was never granted a channel cannot reach it, and that channel's secret is never even decrypted for it.
 - **One switch per channel.** Disabling a channel silences it everywhere without deleting it or its credentials.

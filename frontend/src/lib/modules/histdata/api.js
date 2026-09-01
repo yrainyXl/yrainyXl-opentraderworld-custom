@@ -26,7 +26,18 @@ export const histdataApi = {
   startDownload: (payload) =>
     req('/histdata/downloads', { method: 'POST', body: JSON.stringify(payload) }),
 
+  /** Same payload, queues nothing: what the batch would cost in provider requests. */
+  estimateDownload: (payload) =>
+    req('/histdata/downloads', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, estimate_only: true })
+    }).then((r) => r.estimate),
+
   jobs: () => req('/histdata/jobs').then((r) => r.jobs),
+  /** Stop a job. A running one stops at its next chunk, keeping the bars already stored. */
+  cancelJob: (id) => req(`/histdata/jobs/${id}`, { method: 'DELETE' }),
+  /** Stop every job of a batch that has not finished. */
+  cancelBatch: (id) => req(`/histdata/jobs/batch/${id}`, { method: 'DELETE' }),
 
   datasets: () => req('/histdata/datasets').then((r) => r.datasets),
   append: (id) => req(`/histdata/datasets/${id}/append`, { method: 'POST' }),

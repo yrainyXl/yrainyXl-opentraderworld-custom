@@ -7,7 +7,7 @@
   import { onMount, onDestroy } from 'svelte';
   import * as echarts from 'echarts';
   import { t } from '$lib/i18n';
-  import { equityCurve } from './quicktest.js';
+  import { equityCurve } from './trades.js';
 
   let { trades = [] } = $props();
 
@@ -58,8 +58,9 @@
     const byTs = new Map(points.map((x) => [x.ts, x]));
     // Bounds the colour map spans, always straddling zero so both pieces exist.
     const vals = points.map((x) => x.equity);
-    const hiV = Math.max(0, ...vals);
-    const loV = Math.min(0, ...vals);
+    // Reduced, not spread: a long run closes more trades than the call stack takes arguments.
+    const hiV = vals.reduce((m, x) => (x > m ? x : m), 0);
+    const loV = vals.reduce((m, x) => (x < m ? x : m), 0);
     const pad = Math.max(hiV - loV, 1) * 0.2;
     const hi = hiV + pad;
     const lo = loV - pad;
@@ -92,7 +93,7 @@
     });
     const series = [
       {
-        name: $t('histviz.quick.equity'),
+        name: $t('analysis.equity'),
         type: 'line',
         data: eq,
         step: 'end', // P&L lands when a trade closes, it does not drift between two
@@ -134,12 +135,12 @@
         z: 1,
         itemStyle: { color, opacity: 0.55 }
       });
-      series.push(bar($t('histviz.quick.runup'), up, p.green));
-      series.push(bar($t('histviz.quick.mae'), down, p.red));
+      series.push(bar($t('analysis.runup'), up, p.green));
+      series.push(bar($t('analysis.mae'), down, p.red));
     }
     if (withDrawdown)
       series.push({
-        name: $t('histviz.quick.drawdown'),
+        name: $t('analysis.drawdown'),
         type: 'line',
         data: dd,
         step: 'end',
@@ -171,15 +172,15 @@
             `<div style="display:flex;gap:12px;justify-content:space-between">
                <span style="color:${color}">● ${label}</span><b>${money(v)}</b></div>`;
           return [
-            `<div style="color:${p.dim};text-align:center;margin-bottom:4px">${$t('histviz.quick.tradeN', {
+            `<div style="color:${p.dim};text-align:center;margin-bottom:4px">${$t('analysis.tradeN', {
               n: x.n,
-              side: x.dir > 0 ? $t('histviz.quick.long') : $t('histviz.quick.short')
+              side: x.dir > 0 ? $t('analysis.long') : $t('analysis.short')
             })}</div>`,
-            row($t('histviz.quick.equity'), x.equity, x.equity >= 0 ? p.green : p.red),
-            row($t('histviz.quick.pnl'), x.pnl, x.pnl >= 0 ? p.green : p.red),
-            withExcursions ? row($t('histviz.quick.runup'), x.runup, p.green) : '',
-            withExcursions ? row($t('histviz.quick.mae'), x.mae, p.red) : '',
-            withDrawdown ? row($t('histviz.quick.drawdown'), x.dd, p.red) : ''
+            row($t('analysis.equity'), x.equity, x.equity >= 0 ? p.green : p.red),
+            row($t('analysis.pnl'), x.pnl, x.pnl >= 0 ? p.green : p.red),
+            withExcursions ? row($t('analysis.runup'), x.runup, p.green) : '',
+            withExcursions ? row($t('analysis.mae'), x.mae, p.red) : '',
+            withDrawdown ? row($t('analysis.drawdown'), x.dd, p.red) : ''
           ].join('');
         }
       },
@@ -199,8 +200,8 @@
       },
       xAxis: withDrawdown ? [axis(0, false), axis(1, true)] : [axis(0, true)],
       yAxis: withDrawdown
-        ? [value(0, $t('histviz.quick.pnl'), 4), value(1, $t('histviz.quick.drawdown'), 2)]
-        : [value(0, $t('histviz.quick.pnl'), 4)],
+        ? [value(0, $t('analysis.pnl'), 4), value(1, $t('analysis.drawdown'), 2)]
+        : [value(0, $t('analysis.pnl'), 4)],
       series
     };
   }
@@ -216,18 +217,18 @@
 
 <div class="curve">
   <div class="legend">
-    <span class="item on"><i style:background="var(--green)"></i>{$t('histviz.quick.equity')}</span>
+    <span class="item on"><i style:background="var(--green)"></i>{$t('analysis.equity')}</span>
     <button class="item" class:on={showExcursions} onclick={() => (showExcursions = !showExcursions)}>
       <i style:background="var(--green)"></i><i style:background="var(--red)"></i>
-      {$t('histviz.quick.excursions')}
+      {$t('analysis.excursions')}
     </button>
     <button class="item" class:on={showDrawdown} onclick={() => (showDrawdown = !showDrawdown)}>
-      <i style:background="var(--red)"></i>{$t('histviz.quick.drawdown')}
+      <i style:background="var(--red)"></i>{$t('analysis.drawdown')}
     </button>
   </div>
   <div class="ec" bind:this={el}></div>
   {#if !curve.points.length}
-    <p class="hint">{$t('histviz.quick.noClosed')}</p>
+    <p class="hint">{$t('analysis.noClosed')}</p>
   {/if}
 </div>
 

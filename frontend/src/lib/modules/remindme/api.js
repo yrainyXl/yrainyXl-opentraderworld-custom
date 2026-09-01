@@ -30,6 +30,7 @@ export const remindApi = {
   unreadSince: (since) =>
     req(`/notifications/unread${since ? `?since=${encodeURIComponent(since)}` : ''}`), // { notifications, unread }
   ackAll: () => req('/notifications/ack-all', { method: 'POST' }),
+  clearAll: () => req('/notifications', { method: 'DELETE' }),
   markRead: (id) => req(`/notifications/${id}/read`, { method: 'POST' }),
   removeNotif: (id) => req(`/notifications/${id}`, { method: 'DELETE' })
 };

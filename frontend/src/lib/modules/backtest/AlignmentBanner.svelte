@@ -29,6 +29,9 @@
           n: alignment.overlap_bars.toLocaleString()
         })}
       </span>
+      {#if alignment.grain}
+        <span class="fact">{$t('backtest.align.grain', { tf: alignment.grain })}</span>
+      {/if}
       {#if alignment.warmup_bars > 0}
         <span class="fact warn">{$t('backtest.align.warmup', { n: alignment.warmup_bars })}</span>
       {/if}
@@ -61,8 +64,8 @@
 
 <style>
   .banner {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: var(--hairline) solid var(--border);
+    border-radius: 0;
     background: color-mix(in srgb, var(--surface-2) 40%, transparent);
     padding: var(--space-2) var(--space-3);
     display: flex;

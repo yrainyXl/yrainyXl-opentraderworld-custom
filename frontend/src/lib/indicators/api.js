@@ -2,8 +2,8 @@
  *
  * The rows live in `backtest_indicators` and the route keeps its `/backtest/…` prefix (it is
  * part of the public API + the MCP catalog), but the library itself is module-agnostic: an
- * indicator saved from the backtest expert page is the same row the chart module draws, and
- * an edit on either side shows up on the other. Nothing here is backtest-specific.
+ * indicator saved from the backtest page is the same row the chart module draws, and an edit
+ * on either side shows up on the other. Nothing here is backtest-specific.
  */
 import { redirectIfUnauthorized } from '$lib/auth.js';
 

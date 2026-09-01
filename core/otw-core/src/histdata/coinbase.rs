@@ -25,6 +25,8 @@ static CAP: Capability = Capability {
     timeframes: &["1m", "5m", "15m", "1h", "1d"],
     adjusted: false,
     max_bars_per_req: 300,
+    // Public API tolerates ~10 req/s per IP; half that leaves room for bursts.
+    min_interval_ms: 200,
     searchable: true,
 };
 

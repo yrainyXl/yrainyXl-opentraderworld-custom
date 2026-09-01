@@ -76,6 +76,26 @@ pub fn routes() -> Router<AppState> {
 
 // ── Body sanitisation ────────────────────────────────────────────────────────
 
+/// Inline SVG tags a doc body may keep. Mirrors the website's own allowlist
+/// (`OTWWebsite/lib/sanitize.js`), which is what the published site already renders:
+/// diagrams are drawn as inline SVG, so stripping them here left every synced doc with a
+/// hole where its figure used to be. `script`, `style`, `foreignObject`, `use` and the
+/// animation elements are deliberately absent: those are the ways an SVG runs code or
+/// reaches back out to the network.
+const SVG_TAGS: &[&str] = &[
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text",
+    "tspan", "defs", "marker", "title", "desc",
+];
+
+/// Attributes those tags may carry: geometry and presentation only, no event handlers
+/// (`on*` is not on the list, so ammonia drops every one) and no URL attribute.
+const SVG_ATTRS: &[&str] = &[
+    "viewBox", "viewbox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r",
+    "rx", "ry", "d", "points", "fill", "stroke", "stroke-width", "stroke-dasharray",
+    "stroke-linecap", "stroke-linejoin", "transform", "text-anchor", "font-size", "font-weight",
+    "opacity", "fill-opacity", "stroke-opacity", "role", "aria-label", "xmlns",
+];
+
 /// Ammonia configuration for a doc body.
 ///
 /// Doc bodies are rendered with `{@html}` on the docs page, so whatever is stored here
@@ -85,8 +105,11 @@ pub fn routes() -> Router<AppState> {
 /// an assumption, not a control; clean at ingest so the stored body is safe by
 /// construction, whatever the source turns out to be.
 ///
-/// The allowlist is the notes cleaner (`trader_tasks_api`) widened to what long-form
-/// documentation actually uses: headings through h6, tables, images, figures.
+/// The rule for what it accepts is **parity with the publisher**: every doc body comes from
+/// the website, whose own allowlist (`OTWWebsite/lib/sanitize.js`) is sized to the markup
+/// this app's editor produces. Anything the site publishes but this list omits does not
+/// arrive degraded, it arrives missing, which is how images, inline SVG, highlights and
+/// task lists were silently disappearing on sync. Widen the two lists together.
 fn body_cleaner() -> &'static ammonia::Builder<'static> {
     static CLEANER: OnceLock<ammonia::Builder<'static>> = OnceLock::new();
     CLEANER.get_or_init(|| {
@@ -97,24 +120,121 @@ fn body_cleaner() -> &'static ammonia::Builder<'static> {
                 "kbd", "samp", "blockquote", "ul", "ol", "li", "dl", "dt", "dd", "h1", "h2", "h3",
                 "h4", "h5", "h6", "a", "span", "div", "img", "figure", "figcaption", "table",
                 "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "details", "summary",
+                // Highlight marks, and the inert checkbox of a task list.
+                "mark", "label", "input",
             ]
             .into_iter()
+            .chain(SVG_TAGS.iter().copied())
             .collect(),
         )
         .add_tag_attributes("a", ["href", "title"])
-        .add_tag_attributes("img", ["src", "alt", "title", "width", "height"])
+        .add_tag_attributes("img", ["src", "alt", "title", "width", "height", "style"])
         .add_tag_attributes("td", ["colspan", "rowspan"])
         .add_tag_attributes("th", ["colspan", "rowspan", "scope"])
+        .add_tag_attributes("ol", ["start"])
         .add_tag_attributes("code", ["class"])
         .add_tag_attributes("pre", ["class"])
-        .add_tag_attributes("span", ["class"])
+        .add_tag_attributes("span", ["class", "style"])
         .add_tag_attributes("div", ["class"])
+        .add_tag_attributes("mark", ["style", "data-color"])
+        // Task lists: TipTap marks the list and its items, the checkbox only shows state.
+        .add_tag_attributes("ul", ["data-type"])
+        .add_tag_attributes("li", ["data-type", "data-checked"])
+        .add_tag_attributes("input", ["checked"])
+        // A checkbox is state, never an input a reader can operate: `type` and `disabled`
+        // are forced rather than accepted, so no other kind of control can be smuggled in.
+        .set_tag_attribute_value("input", "type", "checkbox")
+        .set_tag_attribute_value("input", "disabled", "disabled")
+        // The video-embed facade is a figure carrying one class, and only that class.
+        // `add_allowed_classes` is what grants `class` here: listing it in the tag's
+        // attributes as well would make it unrestricted, and ammonia asserts against it.
+        .add_allowed_classes("figure", [VIDEO_FIGURE_CLASS])
+        // Inline styles are the editor's image width and its colour marks, nothing else.
+        // Property names are narrowed here; the values are checked in `attribute_filter`.
+        .filter_style_properties(
+            ["width", "color", "font-size", "background-color"]
+                .into_iter()
+                .collect(),
+        )
         .link_rel(Some("noopener noreferrer nofollow"))
         .set_tag_attribute_value("a", "target", "_blank")
-        // `data:` stays out: an inline SVG data URI in an <img> is a scripting vector.
-        .url_schemes(["http", "https", "mailto"].into_iter().collect());
+        // `data:` is admitted at the scheme gate so a self-contained image can survive the
+        // trip from the website, then narrowed to exactly that by `attribute_filter` below:
+        // ammonia checks schemes first and runs the filter after, so this pair is the only
+        // way to say "data: on <img src>, and only for a raster MIME type". Everything else
+        // carrying a data: URL (an `<a href>`, an SVG-typed image) is dropped there.
+        .url_schemes(["http", "https", "mailto", "data"].into_iter().collect())
+        .attribute_filter(|tag, attr, value| {
+            if attr == "style" {
+                // No CSS function survives, at any property. `url()` and `image-set()` are
+                // the only way an inline style reaches the network, and refusing the whole
+                // function syntax is a rule with no corners to get wrong.
+                return (!value.contains('(')).then(|| value.into());
+            }
+            if !is_data_url(value) {
+                return Some(value.into());
+            }
+            (tag == "img" && attr == "src" && is_safe_image_data_url(value)).then(|| value.into())
+        });
+        for tag in SVG_TAGS {
+            b.add_tag_attributes(*tag, SVG_ATTRS.iter().copied());
+        }
         b
     })
+}
+
+/// Class that marks the video-embed facade, shared by the app and the website renderer.
+const VIDEO_FIGURE_CLASS: &str = "otw-video";
+
+/// Largest `data:` image a doc body may carry. The submission relay refuses a payload past
+/// 7.5 MB in total, so a single image beyond this is malformed rather than merely big.
+const MAX_DATA_URL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Normalise a URL attribute the way the WHATWG parser does before it is inspected: ASCII
+/// tab/CR/LF are removed anywhere, leading and trailing C0 controls and spaces are trimmed.
+/// Without this, `da&#9;ta:` would parse as `data:` for the browser but not for us.
+fn normalize_url_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+        .collect::<String>()
+        .trim_matches(|c: char| c <= ' ')
+        .to_string()
+}
+
+fn is_data_url(value: &str) -> bool {
+    let v = normalize_url_value(value);
+    v.len() >= 5 && v[..5].eq_ignore_ascii_case("data:")
+}
+
+/// A `data:` URL is only kept when it is a base64 raster image.
+///
+/// The MIME type is what decides how a browser treats the bytes, so the allowlist is the
+/// control: none of these types can execute, and `image/svg+xml` (which can) is absent.
+/// The payload alphabet is checked too, so a URL cannot smuggle a second `,` and re-declare
+/// its own type.
+fn is_safe_image_data_url(value: &str) -> bool {
+    const TYPES: &[&str] = &[
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/jpg;base64,",
+        "data:image/gif;base64,",
+        "data:image/webp;base64,",
+        "data:image/avif;base64,",
+    ];
+    let v = normalize_url_value(value);
+    if v.len() > MAX_DATA_URL_BYTES {
+        return false;
+    }
+    let Some(payload) = TYPES.iter().find_map(|p| {
+        (v.len() >= p.len() && v[..p.len()].eq_ignore_ascii_case(p)).then(|| &v[p.len()..])
+    }) else {
+        return false;
+    };
+    !payload.is_empty()
+        && payload
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b' '))
 }
 
 /// Clean one incoming doc in place. Applied on every write path (feed refresh and the
@@ -272,38 +392,44 @@ fn upload_file_id(src: &str) -> Option<Uuid> {
     Uuid::parse_str(src.strip_prefix(FILE_SRC_PREFIX)?).ok()
 }
 
-/// Collect every `src="..."` attribute value in `html` that points at an internal upload.
-fn collect_html_upload_srcs(html: &str, out: &mut BTreeSet<String>) {
+/// Every `src="..."` attribute value in `html`, in document order.
+fn collect_html_srcs(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut rest = html;
     while let Some(pos) = rest.find("src=\"") {
         rest = &rest[pos + 5..];
         let Some(end) = rest.find('"') else { break };
-        let src = &rest[..end];
-        if upload_file_id(src).is_some() {
-            out.insert(src.to_string());
-        }
+        out.push(rest[..end].to_string());
         rest = &rest[end..];
     }
+    out
 }
 
-/// Visit the `attrs.src` of every ProseMirror `image` node.
-fn visit_image_srcs(node: &mut Value, f: &mut impl FnMut(&mut String)) {
+/// Visit the source of every media node in a ProseMirror doc: an `image`'s `src` and a
+/// `videoEmbed`'s `poster`. A video embed stores no bytes of its own, but its thumbnail is
+/// an ordinary upload and has to make the same trip as any other picture.
+fn visit_media_srcs(node: &mut Value, f: &mut impl FnMut(&mut String)) {
     match node {
         Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("image") {
+            let attr = match map.get("type").and_then(Value::as_str) {
+                Some("image") => Some("src"),
+                Some("videoEmbed") => Some("poster"),
+                _ => None,
+            };
+            if let Some(attr) = attr {
                 if let Some(Value::Object(attrs)) = map.get_mut("attrs") {
-                    if let Some(Value::String(src)) = attrs.get_mut("src") {
+                    if let Some(Value::String(src)) = attrs.get_mut(attr) {
                         f(src);
                     }
                 }
             }
             for v in map.values_mut() {
-                visit_image_srcs(v, f);
+                visit_media_srcs(v, f);
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                visit_image_srcs(v, f);
+                visit_media_srcs(v, f);
             }
         }
         _ => {}
@@ -318,9 +444,11 @@ async fn inline_upload_images(
     html: &mut String,
     source_json: &mut Value,
 ) -> Result<(), ApiError> {
-    let mut srcs = BTreeSet::new();
-    collect_html_upload_srcs(html, &mut srcs);
-    visit_image_srcs(source_json, &mut |src| {
+    let mut srcs: BTreeSet<String> = collect_html_srcs(html)
+        .into_iter()
+        .filter(|s| upload_file_id(s).is_some())
+        .collect();
+    visit_media_srcs(source_json, &mut |src| {
         if upload_file_id(src).is_some() {
             srcs.insert(src.clone());
         }
@@ -351,12 +479,33 @@ async fn inline_upload_images(
     for (src, data) in &inlined {
         *html = html.replace(&format!("src=\"{src}\""), &format!("src=\"{data}\""));
     }
-    visit_image_srcs(source_json, &mut |src| {
+    visit_media_srcs(source_json, &mut |src| {
         if let Some(data) = inlined.get(src.as_str()) {
             *src = data.clone();
         }
     });
     Ok(())
+}
+
+/// First media source in the submission that is neither an inlined image nor a resolvable
+/// upload, in both the HTML and the ProseMirror copy. `None` means the doc is self-contained
+/// and will render with nothing to fetch.
+///
+/// Run *after* `inline_upload_images`: an `/api/files/{id}` left over at that point is a
+/// missing or non-image upload, which is just as unpublishable as a remote URL.
+fn first_non_self_contained_src(html: &str, source_json: &Value) -> Option<String> {
+    let mut offender = None;
+    let mut check = |src: &str| {
+        if offender.is_none() && !src.is_empty() && !is_safe_image_data_url(src) {
+            offender = Some(src.chars().take(120).collect::<String>());
+        }
+    };
+    for src in collect_html_srcs(html) {
+        check(&src);
+    }
+    let mut json = source_json.clone();
+    visit_media_srcs(&mut json, &mut |src| check(src));
+    offender
 }
 
 /// Relay a doc submission to the review website. An optional bearer token from the server
@@ -386,6 +535,19 @@ async fn submit_doc(
 
     // The review site can't reach this instance's /api/files/{id} URLs — inline them.
     inline_upload_images(&state, &mut body.html, &mut body.source_json).await?;
+
+    // Everything that survives has to be self-contained, because a published doc travels
+    // back down the feed into every instance and is read offline. A remote `<img>` renders
+    // nowhere useful (the website's CSP is `img-src 'self' data:`) and would beacon the
+    // reader's IP to whoever hosts it, so the submission is refused with something the
+    // author can act on rather than published with a hole in it.
+    if let Some(src) = first_non_self_contained_src(&body.html, &body.source_json) {
+        tracing::info!("doc submission refused: image not self-contained ({src})");
+        return Err(ApiError::bad_request(
+            "an image in this document is linked from another site. Upload the picture into \
+             the document (drag it in, or /image upload) so the published doc works offline.",
+        ));
+    }
 
     // Stamp the submission time server-side; don't trust a client-provided clock.
     let submitted_at = time::OffsetDateTime::now_utc()
@@ -432,4 +594,221 @@ async fn submit_doc(
     }
 
     Ok(Json(json!({ "submitted": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clean(html: &str) -> String {
+        body_cleaner().clean(html).to_string()
+    }
+
+    const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+
+    /// Exactly what `opentraderworld.com` stores in `docs.body` and serves from
+    /// `/api/docs/feed` for a document holding every media kind the editor can produce.
+    /// Regenerate with `node scripts/docs-media/check.mjs` in the website repo, which
+    /// asserts the same shape from the other side.
+    const PUBLISHED_BODY: &str = r##"<p>Body</p><p><mark data-color="#ffd54f" style="background-color:#ffd54f">lit</mark><span style="color:#22c55e;font-size:18px">green</span></p><ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" disabled="disabled" checked="checked" /></label><div><p>done</p></div></li></ul><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt="A chart" style="width:320px" /><figure class="otw-video"><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" rel="noopener noreferrer nofollow"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt="How sizing works" /></a><figcaption>How sizing works</figcaption></figure>"##;
+
+    #[test]
+    fn a_published_doc_arrives_whole() {
+        // The end of the round trip: app editor to the review site to `docs.body` to the
+        // feed to here. Every assertion below is something that used to be dropped.
+        let out = clean(PUBLISHED_BODY);
+
+        assert!(out.contains("data:image/png;base64,iVBORw0KGgo"), "image lost: {out}");
+        assert_eq!(out.matches("data:image/png;base64,").count(), 2, "{out}");
+        assert!(out.contains("style=\"width:320px\""), "image width lost: {out}");
+        assert!(out.contains("alt=\"A chart\""), "{out}");
+
+        assert!(out.contains("<figure class=\"otw-video\">"), "video facade lost: {out}");
+        assert!(
+            out.contains("href=\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\""),
+            "video link lost: {out}"
+        );
+        assert!(out.contains("<figcaption>How sizing works</figcaption>"), "{out}");
+
+        assert!(out.contains("background-color:#ffd54f"), "highlight lost: {out}");
+        assert!(out.contains("color:#22c55e"), "text colour lost: {out}");
+        assert!(out.contains("font-size:18px"), "font size lost: {out}");
+
+        assert!(out.contains("data-type=\"taskList\""), "task list lost: {out}");
+        assert!(out.contains("data-checked=\"true\""), "{out}");
+        assert!(out.contains("type=\"checkbox\""), "{out}");
+        assert!(out.contains("disabled"), "checkbox must stay inert: {out}");
+
+        // Nothing executable came along for the ride.
+        assert!(!out.contains("script"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("javascript:"), "{out}");
+    }
+
+    #[test]
+    fn an_inline_style_can_never_fetch_or_overlay() {
+        // Property names are narrowed by ammonia; the function syntax, which is the only
+        // way a style reaches the network, is refused whole.
+        let out = clean(
+            r#"<img src="x" style="width: 10px; position: fixed; background: url(https://evil.test/beacon)">"#,
+        );
+        assert!(!out.contains("url("), "{out}");
+        assert!(!out.contains("position"), "{out}");
+        let out = clean(r#"<span style="color: red">a</span>"#);
+        assert!(out.contains("color:red"), "{out}");
+    }
+
+    #[test]
+    fn a_checkbox_can_never_become_another_control() {
+        let out = clean(r#"<input type="text" name="pw" value="x" autofocus>"#);
+        assert!(out.contains(r#"type="checkbox""#), "{out}");
+        assert!(out.contains("disabled"), "{out}");
+        assert!(!out.contains("name="), "{out}");
+        assert!(!out.contains("value="), "{out}");
+        assert!(!out.contains("autofocus"), "{out}");
+    }
+
+    #[test]
+    fn a_self_contained_image_survives_the_sync() {
+        // The submission relay inlines every upload as a data: URI, so this is the shape
+        // every image in a published doc actually has. Dropping it left docs image-less.
+        let out = clean(&format!(r#"<p><img src="{PNG}" alt="chart"></p>"#));
+        assert!(out.contains(PNG), "data: image was stripped: {out}");
+        assert!(out.contains(r#"alt="chart""#));
+    }
+
+    #[test]
+    fn a_data_url_is_refused_everywhere_it_could_execute() {
+        // Only <img src> takes a data: URL, and only for a raster MIME type.
+        for html in [
+            r#"<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">x</a>"#,
+            r#"<img src="data:image/svg+xml;base64,PHN2Zz48c2NyaXB0Lz48L3N2Zz4=">"#,
+            r#"<img src="data:text/html,<script>alert(1)</script>">"#,
+            r#"<img src="data:image/png,<script>alert(1)</script>">"#,
+            // A second declaration smuggled into the payload.
+            r#"<img src="data:image/png;base64,x,text/html;base64,PHN2Zz4=">"#,
+        ] {
+            let out = clean(html);
+            assert!(!out.contains("data:"), "data: URL survived: {out}");
+        }
+    }
+
+    #[test]
+    fn a_data_url_cannot_hide_behind_whitespace_normalisation() {
+        // The URL parser removes tab/CR/LF anywhere and trims leading control characters,
+        // so the check has to normalise the same way before it decides.
+        let out = clean("<a href=\"da\tta:text/html,<b>x</b>\">y</a>");
+        assert!(!out.contains("data:"), "obfuscated data: URL survived: {out}");
+        let out = clean(&format!("<img src=\" \r\n{PNG}\">"));
+        assert!(out.contains("base64,iVBORw0KGgoAAAANSUhEUg=="), "{out}");
+    }
+
+    #[test]
+    fn inline_svg_survives_but_cannot_carry_code() {
+        // The website publishes diagrams as inline SVG; stripping the tags here left a
+        // hole in every synced doc.
+        let out = clean(
+            r#"<svg viewBox="0 0 10 10" role="img" aria-label="d"><rect x="1" y="1" width="8" height="8" fill="green"/></svg>"#,
+        );
+        assert!(out.contains("<svg"), "svg was stripped: {out}");
+        assert!(out.contains("<rect"), "svg child was stripped: {out}");
+        assert!(out.contains("viewBox=\"0 0 10 10\""), "{out}");
+
+        let hostile = clean(
+            r#"<svg onload="alert(1)"><script>alert(1)</script><foreignObject><img src=x onerror=alert(1)></foreignObject><a xlink:href="javascript:alert(1)"><circle r="1"/></a></svg>"#,
+        );
+        assert!(!hostile.contains("onload"), "{hostile}");
+        assert!(!hostile.contains("onerror"), "{hostile}");
+        assert!(!hostile.contains("script"), "{hostile}");
+        assert!(!hostile.contains("foreignObject"), "{hostile}");
+        assert!(!hostile.contains("javascript:"), "{hostile}");
+    }
+
+    #[test]
+    fn the_video_facade_survives_and_carries_nothing_else() {
+        let out = clean(&format!(
+            r#"<figure class="otw-video"><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"><img src="{PNG}" alt="Talk"></a><figcaption>Talk</figcaption></figure>"#
+        ));
+        assert!(out.contains(r#"<figure class="otw-video">"#), "{out}");
+        assert!(out.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "{out}");
+        assert!(out.contains(PNG), "{out}");
+        assert!(out.contains("<figcaption>Talk</figcaption>"), "{out}");
+        // A link out of the doc always opens detached from this origin.
+        assert!(out.contains(r#"rel="noopener noreferrer nofollow""#), "{out}");
+
+        // No iframe is part of the design, and none is allowed in.
+        let framed = clean(r#"<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe>"#);
+        assert!(!framed.contains("iframe"), "{framed}");
+        // Any other class on the figure is dropped.
+        let classed = clean(r#"<figure class="otw-video evil"><figcaption>x</figcaption></figure>"#);
+        assert!(classed.contains(r#"class="otw-video""#), "{classed}");
+        assert!(!classed.contains("evil"), "{classed}");
+    }
+
+    #[test]
+    fn scripts_and_handlers_never_reach_the_stored_body() {
+        let out = clean(
+            r#"<p onclick="alert(1)">hi</p><script>alert(1)</script><img src="x" onerror="alert(1)"><a href="javascript:alert(1)">go</a>"#,
+        );
+        assert!(!out.contains("onclick"), "{out}");
+        assert!(!out.contains("onerror"), "{out}");
+        assert!(!out.contains("alert"), "{out}");
+        assert!(!out.contains("javascript:"), "{out}");
+    }
+
+    #[test]
+    fn a_submission_must_be_self_contained_before_it_is_relayed() {
+        let ok_html = format!(r#"<p><img src="{PNG}"></p>"#);
+        let ok_json = json!({
+            "type": "doc",
+            "content": [{ "type": "image", "attrs": { "src": PNG } }]
+        });
+        assert_eq!(first_non_self_contained_src(&ok_html, &ok_json), None);
+
+        // A remote image: nothing to publish, and a beacon if it were.
+        assert_eq!(
+            first_non_self_contained_src(r#"<img src="https://cdn.test/a.png">"#, &Value::Null),
+            Some("https://cdn.test/a.png".to_string())
+        );
+        // An upload the inliner could not resolve (missing file, or not an image).
+        assert_eq!(
+            first_non_self_contained_src(
+                &format!("<img src=\"{FILE_SRC_PREFIX}00000000-0000-0000-0000-000000000000\">"),
+                &Value::Null
+            ),
+            Some(format!("{FILE_SRC_PREFIX}00000000-0000-0000-0000-000000000000"))
+        );
+        // A video embed's poster is checked like any other picture.
+        let video = json!({
+            "type": "doc",
+            "content": [{
+                "type": "videoEmbed",
+                "attrs": { "provider": "youtube", "videoId": "dQw4w9WgXcQ", "poster": "/api/files/x" }
+            }]
+        });
+        assert_eq!(
+            first_non_self_contained_src("", &video),
+            Some("/api/files/x".to_string())
+        );
+    }
+
+    #[test]
+    fn media_sources_are_visited_in_both_node_kinds() {
+        let mut doc = json!({
+            "type": "doc",
+            "content": [
+                { "type": "image", "attrs": { "src": "/api/files/a" } },
+                { "type": "videoEmbed", "attrs": { "poster": "/api/files/b", "src": "ignored" } }
+            ]
+        });
+        let mut seen = Vec::new();
+        visit_media_srcs(&mut doc, &mut |s| {
+            seen.push(s.clone());
+            *s = format!("{s}!");
+        });
+        assert_eq!(seen, vec!["/api/files/a", "/api/files/b"]);
+        assert_eq!(doc["content"][0]["attrs"]["src"], "/api/files/a!");
+        assert_eq!(doc["content"][1]["attrs"]["poster"], "/api/files/b!");
+        // A videoEmbed's `src`, if one ever appears, is not a media source.
+        assert_eq!(doc["content"][1]["attrs"]["src"], "ignored");
+    }
 }

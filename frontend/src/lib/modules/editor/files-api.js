@@ -27,3 +27,28 @@ export function pickFile(accept = 'image/*') {
     input.click();
   });
 }
+
+/**
+ * Resolve a pasted video URL into an embeddable reference.
+ * The core parses the provider and id, looks the video up through the provider's oEmbed
+ * endpoint and stores its thumbnail as a normal upload, so the document keeps a local
+ * poster and stays readable offline. Returns
+ * `{ provider, video_id, url, title, poster }`. `poster` is null when the provider had
+ * no thumbnail to give.
+ */
+export async function resolveVideo(url) {
+  const res = await fetch('/api/video-embed', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url })
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* empty */
+  }
+  redirectIfUnauthorized(res);
+  if (!res.ok) throw new Error(body?.error ?? `video lookup failed (${res.status})`);
+  return body;
+}

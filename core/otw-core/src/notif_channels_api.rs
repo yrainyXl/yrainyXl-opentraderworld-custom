@@ -27,7 +27,8 @@ use otw_store::notif_channels::{self, ChannelInput, ALL_MODULES, CHANNEL_KINDS};
 /// Modules that produce notifications and can therefore be granted a channel. Adding a
 /// notifying module means adding it here (the wildcard grant `*` covers it retroactively)
 /// and passing the same id to [`notif_send::dispatch`].
-pub const NOTIF_MODULES: &[&str] = &["remindme", "watchlists", "mailbox", "webhooks"];
+pub const NOTIF_MODULES: &[&str] =
+    &["remindme", "watchlists", "mailbox", "webhooks", "histdata", "automator"];
 
 pub fn routes() -> Router<AppState> {
     Router::new()

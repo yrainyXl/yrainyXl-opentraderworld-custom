@@ -59,3 +59,5 @@ otw-store = { path = "../otw-store" }
 otw-queue = { path = "../otw-queue" }
 otw-i18n = { path = "../otw-i18n" }
 otw-theme = { path = "../otw-theme" }
+# Automator schedules: IANA timezone database (the workspace uses `time`, which has none).
+time-tz = { version = "2", features = ["db"] }

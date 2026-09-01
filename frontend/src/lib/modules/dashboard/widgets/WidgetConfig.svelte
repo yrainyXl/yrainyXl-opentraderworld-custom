@@ -83,6 +83,7 @@
         onpick={(v) => set('height', v)}
         ariaLabel={$t('dashboard.widgets.config.height')}
         options={[
+          { value: 'title', label: $t('dashboard.widgets.config.titleHeight') },
           { value: 'compact', label: $t('dashboard.widgets.config.compact') },
           { value: 'standard', label: $t('dashboard.widgets.config.standard') },
           { value: 'tall', label: $t('dashboard.widgets.config.tall') }

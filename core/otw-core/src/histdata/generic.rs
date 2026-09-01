@@ -42,6 +42,8 @@ static AV: Capability = Capability {
     // Free daily endpoint (TIME_SERIES_DAILY) is unadjusted; the adjusted variant is premium.
     adjusted: false,
     max_bars_per_req: 5000,
+    // Free key: 5 requests/minute. One every 12 s is the honest pace.
+    min_interval_ms: 12_000,
     searchable: true,
 };
 static EODHD: Capability = Capability {
@@ -55,6 +57,8 @@ static EODHD: Capability = Capability {
     timeframes: &["1m", "5m", "1h", "1d", "1w"],
     adjusted: true,
     max_bars_per_req: 5000,
+    // Paid plans meter per day, not per second; a light spacing is enough.
+    min_interval_ms: 250,
     searchable: true,
 };
 static YAHOO: Capability = Capability {
@@ -68,6 +72,8 @@ static YAHOO: Capability = Capability {
     timeframes: &["1m", "5m", "15m", "1h", "1d", "1w"],
     adjusted: true,
     max_bars_per_req: 5000,
+    // Unofficial endpoint with no published limit: stay deliberately slow.
+    min_interval_ms: 600,
     searchable: true,
 };
 static ALPACA: Capability = Capability {
@@ -81,6 +87,8 @@ static ALPACA: Capability = Capability {
     timeframes: &["1m", "5m", "15m", "1h", "1d"],
     adjusted: true,
     max_bars_per_req: 10000,
+    // Free key: 200 requests/minute.
+    min_interval_ms: 350,
     searchable: true,
 };
 
@@ -99,6 +107,8 @@ static MASSIVE: Capability = Capability {
     // adj_* column), so we request unadjusted and leave adj_* None for consistency with peers.
     adjusted: false,
     max_bars_per_req: 50000,
+    // Free key: 5 requests/minute, and 429 over it.
+    min_interval_ms: 12_000,
     searchable: true,
 };
 

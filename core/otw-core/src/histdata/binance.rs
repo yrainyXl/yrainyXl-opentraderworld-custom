@@ -24,6 +24,8 @@ static CAP: Capability = Capability {
     timeframes: &["1m", "5m", "15m", "1h", "4h", "1d", "1w"],
     adjusted: false,
     max_bars_per_req: 1000,
+    // ~1200 weight/min, klines cost 1-2: 5 req/s stays far under it.
+    min_interval_ms: 200,
     searchable: true,
 };
 

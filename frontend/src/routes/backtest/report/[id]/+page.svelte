@@ -4,42 +4,30 @@
   // Print-clean report for a saved run. Loads the run, reruns it to get the full result
   // (trades, equity, benchmark, per-asset), and renders a layout tuned for the browser's
   // Print → Save as PDF (an @media print block strips chrome). Also links the raw .md export.
-  import { backtestApi, migrateSettings, normalizeSettings, embedIndicators, fmtNum, conditionText, inverseSide } from '$lib/modules/backtest/api.js';
+  import { backtestApi, migrateSettings, normalizeSettings, embedIndicators, fmtNum, conditionText, inverseSide, toAnalysisTrades } from '$lib/modules/backtest/api.js';
+  import { stats as closedTradeStats } from '$lib/analysis/trades.js';
+  import TradeStats from '$lib/analysis/TradeStats.svelte';
+  import TradeCurve from '$lib/analysis/TradeCurve.svelte';
   import ResultChart from '$lib/modules/backtest/ResultChart.svelte';
   import StatsGrid from '$lib/modules/backtest/StatsGrid.svelte';
   import PerfTable from '$lib/modules/backtest/PerfTable.svelte';
   import AssetBreakdown from '$lib/modules/backtest/AssetBreakdown.svelte';
+  import DcaPanel from '$lib/modules/backtest/DcaPanel.svelte';
   import OosBlock from '$lib/modules/backtest/OosBlock.svelte';
+  import ExitReasons from '$lib/modules/backtest/ExitReasons.svelte';
   import RequireModule from '$lib/modules/RequireModule.svelte';
 
   const id = $derived($page.params.id);
-  // Return to the page we came from (expert or normal), reloading the same run.
-  const backUrl = $derived(
-    ($page.url.searchParams.get('from') === 'expert' ? '/backtest/expert' : '/backtest') + `?run=${id}`
-  );
+  // Back to the backtester, reloading the same run.
+  const backUrl = $derived(`/backtest?run=${id}`);
 
   let run = $state(null);
   let result = $state(null);
-  let bars = $state(null);
-  let datasetIds = $state([]);
-  let chartAssetId = $state(null);
+  // One entry per dataset: { id, ticker, bars }. A report is printed, not browsed, so every
+  // asset is loaded and drawn rather than picked one at a time.
+  let assets = $state([]);
   let error = $state('');
   let loading = $state(true);
-
-  // Assets for the chart picker: pair each dataset id with its ticker from per_asset (same order
-  // as the run's dataset_ids). Single-asset runs yield one entry → picker hidden.
-  const chartAssets = $derived(
-    datasetIds.map((id, i) => ({ id, ticker: result?.per_asset?.[i]?.ticker ?? run?.ticker ?? String(id) }))
-  );
-  async function switchChartAsset(id) {
-    const nid = datasetIds.find((d) => String(d) === String(id)) ?? id;
-    chartAssetId = nid;
-    try {
-      bars = await backtestApi.bars(nid);
-    } catch (e) {
-      error = e.message;
-    }
-  }
 
   async function load() {
     loading = true;
@@ -52,14 +40,16 @@
       if (!ids.length) throw new Error($t('backtest.page.datasetDeletedErr'));
       const settings = embedIndicators(normalizeSettings(migrateSettings(run.settings)), []);
       // Replaying a stored run to rebuild its chart — not a new run, so keep it out of history.
-      const [res, b] = await Promise.all([
+      const [res, ...barsets] = await Promise.all([
         backtestApi.run(ids, settings, { record: false }),
-        backtestApi.bars(ids[0])
+        ...ids.map((did) => backtestApi.bars(did))
       ]);
       result = res;
-      bars = b;
-      datasetIds = ids;
-      chartAssetId = ids[0];
+      assets = ids.map((id, i) => ({
+        id,
+        ticker: res.per_asset?.[i]?.ticker ?? run.ticker ?? String(id),
+        bars: barsets[i]
+      }));
     } catch (e) {
       error = e.message;
     } finally {
@@ -71,6 +61,44 @@
   });
 
   const generatedAt = new Date().toLocaleString();
+
+  // Window the run covered, its size and the warm-up it burned: the line that says what the
+  // numbers below were measured over.
+  const day = (ts) => String(ts ?? '').split('T')[0];
+  const contextLine = $derived.by(() => {
+    if (!result) return '';
+    const eq = result.equity ?? [];
+    const bits = [];
+    if (eq.length > 1) bits.push(`${day(eq[0].ts)} → ${day(eq[eq.length - 1].ts)}`);
+    if (result.bars != null) bits.push($t('backtest.page.barsCount', { count: fmtNum(result.bars, 0) }));
+    if (result.warmup_bars > 0) bits.push($t('backtest.page.warmup', { n: result.warmup_bars }));
+    return bits.join(' · ');
+  });
+
+  // Closed trades in the shape the analysis views read, for the run and for each asset. A
+  // single-asset run's trades carry no ticker, so the per-asset pass only runs on a portfolio.
+  const analysisTrades = $derived(toAnalysisTrades(result?.trades ?? []));
+  const runStats = $derived(closedTradeStats(analysisTrades));
+  const perAsset = $derived(
+    (result?.per_asset ?? []).length > 1
+      ? result.per_asset.map((a) => {
+          const trades = toAnalysisTrades((result.trades ?? []).filter((t) => t.ticker === a.ticker));
+          return { row: a, trades, stats: closedTradeStats(trades) };
+        })
+      : []
+  );
+
+  // Entries the engine refused and bars it sat out: the fine print behind the headline.
+  const notes = $derived.by(() => {
+    if (!result) return [];
+    const out = [];
+    if (result.skipped_min_size) out.push($t('backtest.page.skippedMin', { n: result.skipped_min_size }));
+    if (result.skipped_margin) out.push($t('backtest.page.skippedMargin', { n: result.skipped_margin }));
+    if (result.halted_bars) out.push($t('backtest.page.halted', { n: result.halted_bars }));
+    if (result.filtered_bars) out.push($t('backtest.page.filtered', { n: result.filtered_bars }));
+    if (result.total_funding) out.push($t('backtest.report.fundingNote', { amount: fmtNum(result.total_funding) }));
+    return out;
+  });
 
   // Strategy definition for the report body (migrated from the saved run).
   const strat = $derived(run?.settings ? migrateSettings(run.settings) : null);
@@ -100,7 +128,8 @@
     <a class="btn" href={backUrl}>← {$t('backtest.report.back')}</a>
     <div class="spacer"></div>
     {#if run}
-      <a class="btn" href={backtestApi.reportUrl(run.id)} download={`${run.name}.md`}>⬇ {$t('backtest.report.downloadMd')}</a>
+      <!-- Bare `download`: the server names the file after the run's strategy and the moment. -->
+      <a class="btn" href={backtestApi.reportUrl(run.id)} download>⬇ {$t('backtest.report.downloadMd')}</a>
       <button class="btn primary" onclick={() => window.print()}>🖨 {$t('backtest.report.printPdf')}</button>
     {/if}
   </div>
@@ -116,9 +145,10 @@
         {#if result.per_asset?.length > 1}{result.per_asset.map((a) => a.ticker).join(' · ')}{:else}{run.ticker}{/if}
         · {run.timeframe} · <span class="muted">{$t('backtest.report.generated', { at: generatedAt })}</span>
       </p>
+      {#if contextLine}<p class="sub muted">{contextLine}</p>{/if}
     </header>
 
-    <StatsGrid stats={result.stats} />
+    <StatsGrid stats={result.stats} dca={result.dca ?? false} />
 
     {#if strat}
       <section class="strategy">
@@ -165,14 +195,61 @@
       </div>
     {/if}
 
-    <div class="chart-box">
-      <ResultChart {bars} trades={result.trades} equity={result.equity} benchmark={result.benchmark ?? []}
-        assets={chartAssets} bind:activeAssetId={chartAssetId} onassetchange={switchChartAsset} />
-    </div>
+    <!-- One price chart per asset: a printed page has no picker to click. -->
+    {#each assets as a (a.id)}
+      <section class="chart-sec">
+        {#if assets.length > 1}<h2>{a.ticker}</h2>{/if}
+        <div class="chart-box">
+          <ResultChart bars={a.bars} trades={result.trades} equity={result.equity}
+            benchmark={result.benchmark ?? []} assets={[a]} activeAssetId={a.id} />
+        </div>
+      </section>
+    {/each}
+
+    <!-- A savings plan books a Trade only on a sell: what it holds at the last bar is the
+         result, so the plan block carries the report where the trade views would be empty. -->
+    {#if result.dca}
+      <DcaPanel dca={result.dca} perAsset={result.per_asset ?? []}
+        asOf={result.equity?.length ? result.equity[result.equity.length - 1].ts : ''} />
+    {/if}
 
     {#if result.oos}<OosBlock oos={result.oos} />{/if}
-    <AssetBreakdown perAsset={result.per_asset ?? []} />
-    <PerfTable stats={result.stats} />
+    <PerfTable stats={result.stats} dca={!!result.dca} />
+    <ExitReasons reasons={result.stats?.exit_reasons ?? {}} />
+
+    <!-- The statistics and performance views of the results screen, whole run first. -->
+    {#if analysisTrades.length}
+      <section class="analysis">
+        <h2>{$t('backtest.result.statistics')}</h2>
+        <TradeStats s={runStats} trades={analysisTrades} />
+      </section>
+      <section class="analysis">
+        <h2>{$t('backtest.result.performance')}</h2>
+        <div class="curve-box"><TradeCurve trades={analysisTrades} /></div>
+      </section>
+    {/if}
+
+    {#if !result.dca}<AssetBreakdown perAsset={result.per_asset ?? []} />{/if}
+
+    <!-- Then the same read, asset by asset. -->
+    {#each perAsset as a (a.row.ticker)}
+      {#if a.trades.length}
+        <section class="analysis">
+          <h2>{a.row.ticker}</h2>
+          <TradeStats s={a.stats} trades={a.trades} />
+          <div class="curve-box"><TradeCurve trades={a.trades} /></div>
+        </section>
+      {/if}
+    {/each}
+
+    {#if notes.length}
+      <section class="notes">
+        <h2>{$t('backtest.report.notes')}</h2>
+        <ul>
+          {#each notes as n (n)}<li>{n}</li>{/each}
+        </ul>
+      </section>
+    {/if}
   {/if}
 </div>
 </div>
@@ -316,6 +393,43 @@
   .side .risk {
     color: var(--muted);
   }
+  .chart-sec h2,
+  .analysis h2 {
+    font-size: 0.7rem;
+    font-weight: var(--fw-medium);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: var(--space-2);
+  }
+  .analysis {
+    break-inside: avoid;
+  }
+  .curve-box {
+    height: 360px;
+  }
+  .notes {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    break-inside: avoid;
+  }
+  .notes h2 {
+    font-size: 0.7rem;
+    font-weight: var(--fw-medium);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+  .notes ul {
+    margin-top: var(--space-2);
+    padding-left: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--text-base);
+    color: var(--muted);
+  }
 
   /* Print: strip toolbar + app chrome, force a light, ink-friendly page. */
   @media print {
@@ -349,6 +463,15 @@
     .chart-box {
       height: 360px;
       break-inside: avoid;
+    }
+    .curve-box {
+      height: 300px;
+      break-inside: avoid;
+    }
+    /* Each asset's block starts its own page: a chart split across a fold is unreadable. */
+    .chart-sec + .chart-sec,
+    .analysis + .analysis {
+      break-before: page;
     }
     /* Keep tables and blocks from splitting awkwardly across page breaks. */
     :global(table),

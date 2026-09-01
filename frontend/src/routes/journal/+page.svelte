@@ -8,6 +8,8 @@
   import { onMount } from 'svelte';
   import { journalApi, CURRENCIES } from '$lib/modules/journal/api.js';
   import Breakdown from '$lib/modules/journal/Breakdown.svelte';
+  import Analytics from '$lib/modules/journal/Analytics.svelte';
+  import TagsAdmin from '$lib/modules/journal/TagsAdmin.svelte';
   import CalendarView from '$lib/modules/journal/CalendarView.svelte';
   import Trades from '$lib/modules/journal/Trades.svelte';
   import Strategies from '$lib/modules/journal/Strategies.svelte';
@@ -21,7 +23,8 @@
   import PromptModal from '$lib/ui/PromptModal.svelte';
   import { t } from '$lib/i18n';
 
-  let view = $state('breakdown'); // breakdown | calendar | trades | strategies | templates | fees | import | pending
+  // breakdown | analytics | calendar | trades | strategies | tags | templates | fees | import | pending
+  let view = $state('breakdown');
   // Set when navigating from a calendar cell → pins the Trades list to that 'YYYY-MM-DD',
   // and doubles as the way back: the calendar reopens on that day's month.
   let tradesInitialDay = $state('');
@@ -34,9 +37,11 @@
   const PREFS_KEY = 'otw.journal.prefs.v1';
   const NAV_IDS = [
     'breakdown',
+    'analytics',
     'calendar',
     'trades',
     'strategies',
+    'tags',
     'templates',
     'fees',
     'import',
@@ -95,6 +100,7 @@
   let templates = $state([]);
   let feeSchedules = $state([]);
   let settings = $state({ display_currency: 'USD' });
+  let tags = $state([]);
   let pendingCount = $state(0);
   // Autocomplete pools for the breakdown filter bar (tickers/signals).
   let suggestions = $state({ tickers: [], exchanges: [], signals: [] });
@@ -106,14 +112,16 @@
 
   async function loadAll() {
     const lastCat = loadPrefs(); // null | '' (all) | id
-    [categories, strategies, templates, feeSchedules, settings, suggestions] = await Promise.all([
-      journalApi.listCategories(),
-      journalApi.listStrategies(),
-      journalApi.listTemplates(),
-      journalApi.listFeeSchedules(),
-      journalApi.getSettings(),
-      journalApi.suggestions()
-    ]);
+    [categories, strategies, templates, feeSchedules, settings, suggestions, tags] =
+      await Promise.all([
+        journalApi.listCategories(),
+        journalApi.listStrategies(),
+        journalApi.listTemplates(),
+        journalApi.listFeeSchedules(),
+        journalApi.getSettings(),
+        journalApi.suggestions(),
+        journalApi.listTags()
+      ]);
     // Restore the persisted scope: '' = all categories; an id if it still exists;
     // otherwise fall back to the default (or first) category.
     if (lastCat === '') {
@@ -144,6 +152,9 @@
   }
   async function reloadTemplates() {
     templates = await journalApi.listTemplates();
+  }
+  async function reloadTags() {
+    tags = await journalApi.listTags();
   }
   async function reloadFeesSettings() {
     [feeSchedules, settings] = await Promise.all([
@@ -247,17 +258,21 @@
   }
 
   const nav = [
-    { id: 'breakdown', labelKey: 'journal.page.nav.breakdown', icon: '📊' },
-    { id: 'calendar', labelKey: 'journal.page.nav.calendar', icon: '📅' },
-    { id: 'trades', labelKey: 'journal.page.nav.trades', icon: '🧾' },
-    { id: 'strategies', labelKey: 'journal.page.nav.strategies', icon: '🎯' },
-    { id: 'templates', labelKey: 'journal.page.nav.templates', icon: '🧩' },
-    { id: 'fees', labelKey: 'journal.page.nav.fees', icon: '💱' },
-    { id: 'import', labelKey: 'journal.page.nav.import', icon: '📥' },
-    { id: 'pending', labelKey: 'journal.page.nav.pending', icon: '📌' }
+    { id: 'breakdown', labelKey: 'journal.page.nav.breakdown', icon: 'bar-chart' },
+    { id: 'analytics', labelKey: 'journal.page.nav.analytics', icon: 'trending-up' },
+    { id: 'calendar', labelKey: 'journal.page.nav.calendar', icon: 'calendar-days' },
+    { id: 'trades', labelKey: 'journal.page.nav.trades', icon: 'receipt' },
+    { id: 'strategies', labelKey: 'journal.page.nav.strategies', icon: 'target' },
+    { id: 'tags', labelKey: 'journal.page.nav.tags', icon: 'tag' },
+    { id: 'templates', labelKey: 'journal.page.nav.templates', icon: 'layers' },
+    { id: 'fees', labelKey: 'journal.page.nav.fees', icon: 'coins' },
+    { id: 'import', labelKey: 'journal.page.nav.import', icon: 'download' },
+    { id: 'pending', labelKey: 'journal.page.nav.pending', icon: 'check-square' }
   ];
 
-  const scoped = $derived(view === 'breakdown' || view === 'calendar' || view === 'trades');
+  const scoped = $derived(
+    view === 'breakdown' || view === 'analytics' || view === 'calendar' || view === 'trades'
+  );
   const currentCat = $derived(categories.find((c) => c.id === categoryId) ?? null);
 
   // Export dialog (trades CSV / weekly-monthly report).
@@ -286,7 +301,8 @@
             view = n.id;
           }}
         >
-          <span class="nicon">{n.icon}</span>{$t(n.labelKey)}
+          <span class="nicon"><Icon name={n.icon} size={16} strokeWidth={1.6} /></span>
+          <span class="nlabel">{$t(n.labelKey)}</span>
           {#if n.id === 'pending' && pendingCount > 0}<span class="badge">{pendingCount}</span>{/if}
         </button>
       {/each}
@@ -390,9 +406,20 @@
             {categoryId}
             category={currentCat}
             {strategies}
+            {tags}
             {suggestions}
             displayCurrency={settings.display_currency}
             oncategoryChanged={reloadCategories}
+          />
+        {/key}
+      {:else if view === 'analytics'}
+        {#key dataVersion}
+          <Analytics
+            {categoryId}
+            {strategies}
+            {tags}
+            {suggestions}
+            displayCurrency={settings.display_currency}
           />
         {/key}
       {:else if view === 'calendar'}
@@ -417,6 +444,7 @@
             {templates}
             {feeSchedules}
             {suggestions}
+            {tags}
             initialDay={tradesInitialDay}
             onback={tradesInitialDay
               ? () => {
@@ -439,6 +467,8 @@
           oncategoriesChanged={reloadCategories}
           onstrategiesChanged={reloadStrategies}
         />
+      {:else if view === 'tags'}
+        <TagsAdmin {tags} ontagsChanged={reloadTags} />
       {:else if view === 'templates'}
         <Templates {templates} {feeSchedules} onchanged={reloadTemplates} />
       {:else if view === 'fees'}
@@ -511,18 +541,21 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    width: 100%;
+    min-height: 30px;
     background: transparent;
     border: none;
     border-left: var(--active-rule) solid transparent;
     color: var(--muted);
     text-align: left;
-    padding: var(--pad-nav);
+    padding: 6px 10px;
     border-radius: 0;
     cursor: pointer;
     font-size: var(--fs-body);
   }
   .navitem:hover {
     background: var(--surface-2);
+    color: var(--text);
   }
   .navitem.active {
     background: var(--surface-2);
@@ -530,13 +563,38 @@
     color: var(--text);
     font-weight: var(--fw-medium);
   }
+  /* Fixed icon box so every label starts on the same optical column. */
   .nicon {
-    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    color: var(--faint);
   }
+  .navitem:hover .nicon {
+    color: var(--muted);
+  }
+  .navitem.active .nicon {
+    color: var(--accent);
+  }
+  .nlabel {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Counter pill: reads as a value, not as a label — mono, outlined, never filled. */
   .badge {
     margin-left: auto;
-    color: var(--muted);
-    font-size: var(--fs-section);
+    flex-shrink: 0;
+    min-width: 18px;
+    padding: 1px 5px;
+    border: var(--hairline) solid var(--border-control);
+    color: var(--dim);
+    font-size: var(--fs-metric-label);
     letter-spacing: 0.06em;
     text-align: center;
     font-family: var(--mono);

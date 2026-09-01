@@ -118,8 +118,8 @@ async fn delete_project(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct PositionBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct PositionBody {
     position: f64,
 }
 
@@ -245,8 +245,8 @@ async fn revert(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     Ok(Json(json!({ "reverted": n })))
 }
 
-#[derive(Deserialize)]
-struct SettingsBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct SettingsBody {
     display_currency: Option<String>,
 }
 

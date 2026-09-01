@@ -346,6 +346,9 @@ fn build_roundtrip(grid: &Grid, r: &Reader, mapping: &Mapping, ctx: &BuildCtx) -
             entries: vec![],
             exits: vec![],
             brackets: vec![],
+            // A broker statement carries no plan: no stop, no discipline tag.
+            stop_price: None,
+            tags: vec![],
         };
 
         trades.push(BuiltTrade {
@@ -621,6 +624,9 @@ impl Position {
             entries: self.entries,
             exits: self.exits,
             brackets: vec![],
+            // A broker statement carries no plan: no stop, no discipline tag.
+            stop_price: None,
+            tags: vec![],
         };
         BuiltTrade {
             row_hash: hasher.group(&self.hash_keys),

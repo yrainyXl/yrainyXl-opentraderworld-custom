@@ -71,6 +71,7 @@ Historical Data, Visualization and Watchlists also share one list of **[data con
 | [Time Tracker](/modules/productivity#time) | Project timers with budgets and hourly-rate value. |
 | [Prompt Store](/modules/productivity#prompt-store) | Searchable library of reusable AI prompts, tagged, rated and versioned. |
 | [Webhooks](/modules/productivity#webhooks) | Private inbound URLs that turn external alerts into notifications. |
+| [Automator](/modules/automator) | Workflows over your own API and the outside world, by hand or on a schedule. |
 
 ### AI
 

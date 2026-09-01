@@ -704,7 +704,7 @@ pub async fn get_message(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Messa
         .context("fetching mail message")
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct MessagePatch {
     pub read: Option<bool>,
     pub starred: Option<bool>,

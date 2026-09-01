@@ -57,6 +57,26 @@
     error = '';
   }
 
+  /** Which value input is currently revealed (press-and-hold on its eye). */
+  let peeking = $state(null);
+
+  // Reveal while the pointer is held down; remask on release, wherever it happens.
+  function peek(e, key) {
+    e.preventDefault();
+    const input = e.currentTarget.parentElement?.querySelector('input');
+    if (!input) return;
+    input.type = 'text';
+    peeking = key;
+    const off = () => {
+      input.type = 'password';
+      peeking = null;
+      window.removeEventListener('pointerup', off);
+      window.removeEventListener('pointercancel', off);
+    };
+    window.addEventListener('pointerup', off);
+    window.addEventListener('pointercancel', off);
+  }
+
   async function save() {
     if (!name.trim()) {
       error = $t('vault.err.nameRequired');
@@ -116,13 +136,24 @@
             {#if it.removed}
               <span class="muted small">{$t('vault.willRemove')}</span>
             {:else}
-              <input
-                type="password"
-                class="ival"
-                bind:value={it.newValue}
-                placeholder={$t('vault.valueSet')}
-                autocomplete="new-password"
-              />
+              <div class="ival peekwrap">
+                <input
+                  type="password"
+                  bind:value={it.newValue}
+                  placeholder={$t('vault.valueSet')}
+                  autocomplete="new-password"
+                />
+                <button
+                  class="peek"
+                  type="button"
+                  tabindex="-1"
+                  title={$t('vault.reveal')}
+                  aria-label={$t('vault.reveal')}
+                  onpointerdown={(e) => peek(e, it.id)}
+                >
+                  <Icon name={peeking === it.id ? 'eye-off' : 'eye'} size={12} />
+                </button>
+              </div>
             {/if}
             <button
               class="ghost danger"
@@ -151,14 +182,25 @@
             placeholder={$t('vault.itemNamePlaceholder')}
             maxlength="80"
           />
-          <input
-            type="password"
-            class="ival"
-            bind:value={newValue}
-            placeholder={$t('vault.itemValuePlaceholder')}
-            autocomplete="new-password"
-            onkeydown={(e) => e.key === 'Enter' && stageAdd()}
-          />
+          <div class="ival peekwrap">
+            <input
+              type="password"
+              bind:value={newValue}
+              placeholder={$t('vault.itemValuePlaceholder')}
+              autocomplete="new-password"
+              onkeydown={(e) => e.key === 'Enter' && stageAdd()}
+            />
+            <button
+              class="peek"
+              type="button"
+              tabindex="-1"
+              title={$t('vault.reveal')}
+              aria-label={$t('vault.reveal')}
+              onpointerdown={(e) => peek(e, 'new')}
+            >
+              <Icon name={peeking === 'new' ? 'eye-off' : 'eye'} size={12} />
+            </button>
+          </div>
           <button class="ghost" disabled={!newName.trim() || !newValue} onclick={stageAdd}>
             <Icon name="plus" size={12} /> {$t('vault.addItem')}
           </button>
@@ -260,9 +302,37 @@
     font-size: var(--text-sm);
   }
   input.iname,
-  input.ival {
+  .peekwrap input {
     padding: 5px 8px;
     font-size: var(--text-sm);
+  }
+  /* One control = one frame: the wrapper owns the hairline, the input is bare. */
+  .peekwrap {
+    display: flex;
+    align-items: center;
+    background: var(--surface-2);
+    border: 0.5px solid var(--border-control);
+  }
+  .peekwrap:focus-within {
+    border-color: var(--accent);
+  }
+  .peekwrap input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+  }
+  button.peek {
+    display: inline-flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    color: var(--dim);
+    padding: 4px 7px;
+    cursor: pointer;
+  }
+  button.peek:hover {
+    color: var(--text);
   }
   .ival,
   .grow {

@@ -341,11 +341,29 @@ pub struct Job {
     pub error: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Next bar ts to fetch. Set after every chunk, so a job that was parked or interrupted
+    /// resumes here instead of refetching what it already stored.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub chunk_cursor: Option<OffsetDateTime>,
+    /// When a parked (`waiting`) job may run again. NULL on every other status.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub resume_at: Option<OffsetDateTime>,
+    /// Why it is parked: `quota` (the connector's declared cap is spent) or `rate_limit`
+    /// (the provider answered 429). Kept after the resume so the page can explain a pause.
+    pub wait_reason: Option<String>,
+    /// Consecutive parks; drives the backoff when the provider sends no Retry-After.
+    pub wait_count: i32,
+    /// The submission this job was queued with (batch download). NULL for a lone job.
+    pub batch_id: Option<Uuid>,
 }
 
 const JOB_COLS: &str = "id, dataset_id, connector_id, provider, asset_type, ticker, timeframe, \
                         range_from, range_to, kind, status, chunks_done, chunks_total, \
-                        bars_written, error, created_at";
+                        bars_written, error, created_at, chunk_cursor, resume_at, wait_reason, \
+                        wait_count, batch_id";
+
+/// Statuses a job can still leave on its own — anything else is terminal.
+const LIVE_STATUSES: &str = "('queued', 'running', 'waiting', 'cancelling')";
 
 /// Parameters for queueing a download.
 pub struct NewJob<'a> {
@@ -358,6 +376,8 @@ pub struct NewJob<'a> {
     pub range_from: OffsetDateTime,
     pub range_to: OffsetDateTime,
     pub kind: &'a str,
+    /// Groups the jobs one submission queued; None for a single download.
+    pub batch_id: Option<Uuid>,
 }
 
 pub async fn enqueue_job(pool: &PgPool, j: &NewJob<'_>) -> anyhow::Result<Uuid> {
@@ -365,8 +385,8 @@ pub async fn enqueue_job(pool: &PgPool, j: &NewJob<'_>) -> anyhow::Result<Uuid> 
     sqlx::query(
         "INSERT INTO histdata_jobs \
            (id, dataset_id, connector_id, provider, asset_type, ticker, timeframe, \
-            range_from, range_to, kind) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            range_from, range_to, kind, batch_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(id)
     .bind(j.dataset_id)
@@ -378,6 +398,7 @@ pub async fn enqueue_job(pool: &PgPool, j: &NewJob<'_>) -> anyhow::Result<Uuid> 
     .bind(j.range_from)
     .bind(j.range_to)
     .bind(j.kind)
+    .bind(j.batch_id)
     .execute(pool)
     .await
     .context("enqueuing job")?;
@@ -395,12 +416,15 @@ pub async fn list_jobs(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<Job>> {
 
 // ── Worker-side job lifecycle ──────────────────────────────────────────────────
 
-/// Claim the oldest queued job, flipping it to `running`. Returns None when idle.
-/// `FOR UPDATE SKIP LOCKED` keeps this safe even if more than one worker ever runs.
+/// Claim the oldest runnable job, flipping it to `running`. Returns None when idle.
+/// Runnable = freshly queued, or parked and past its `resume_at`. `FOR UPDATE SKIP LOCKED`
+/// keeps this safe even if more than one worker ever runs.
 pub async fn claim_next_job(pool: &PgPool) -> anyhow::Result<Option<Job>> {
     let sql = format!(
         "UPDATE histdata_jobs SET status = 'running', started_at = now() \
-         WHERE id = (SELECT id FROM histdata_jobs WHERE status = 'queued' \
+         WHERE id = (SELECT id FROM histdata_jobs \
+                     WHERE status = 'queued' \
+                        OR (status = 'waiting' AND resume_at IS NOT NULL AND resume_at <= now()) \
                      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING {JOB_COLS}"
     );
@@ -409,13 +433,113 @@ pub async fn claim_next_job(pool: &PgPool) -> anyhow::Result<Option<Job>> {
         .await?)
 }
 
-/// Re-queue any job stuck in `running` (e.g. process crash mid-download) so the
-/// worker resumes it. Called once at startup.
+/// Re-queue any job stuck in `running` (e.g. process crash mid-download) so the worker
+/// resumes it. A crash mid-cancel honours the user: `cancelling` becomes `cancelled`
+/// rather than restarting. Called once at startup.
 pub async fn requeue_orphans(pool: &PgPool) -> anyhow::Result<u64> {
+    sqlx::query(
+        "UPDATE histdata_jobs SET status = 'cancelled', finished_at = now() \
+         WHERE status = 'cancelling'",
+    )
+    .execute(pool)
+    .await?;
     let res = sqlx::query("UPDATE histdata_jobs SET status = 'queued' WHERE status = 'running'")
         .execute(pool)
         .await?;
     Ok(res.rows_affected())
+}
+
+/// Park a running job until `resume_at`: it keeps its progress and is claimed again once
+/// that instant passes. `reason` is `quota` or `rate_limit`.
+pub async fn park_job(
+    pool: &PgPool,
+    job_id: Uuid,
+    resume_at: OffsetDateTime,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE histdata_jobs SET status = 'waiting', resume_at = $2, wait_reason = $3, \
+             wait_count = wait_count + 1 \
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(resume_at)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .context("parking job")?;
+    Ok(())
+}
+
+/// Clear the parking marks after a chunk goes through, so the backoff ladder starts from
+/// scratch the next time the provider pushes back.
+pub async fn clear_wait(pool: &PgPool, job_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE histdata_jobs SET resume_at = NULL, wait_reason = NULL, wait_count = 0 \
+         WHERE id = $1 AND (resume_at IS NOT NULL OR wait_count > 0)",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Current status of one job — the worker polls this between chunks to notice a cancel.
+pub async fn job_status(pool: &PgPool, job_id: Uuid) -> anyhow::Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT status FROM histdata_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Ask a job to stop. A job that has not started yet (or is parked) ends immediately as
+/// `cancelled`; a running one is marked `cancelling` and the worker finishes it at the next
+/// chunk boundary, keeping the bars already written. Returns the new status, or None when
+/// the job is already finished (nothing to cancel).
+pub async fn cancel_job(pool: &PgPool, job_id: Uuid) -> anyhow::Result<Option<String>> {
+    let sql = format!(
+        "UPDATE histdata_jobs SET \
+             status = CASE WHEN status = 'running' THEN 'cancelling' ELSE 'cancelled' END, \
+             finished_at = CASE WHEN status = 'running' THEN finished_at ELSE now() END, \
+             resume_at = NULL \
+         WHERE id = $1 AND status IN {LIVE_STATUSES} \
+         RETURNING status"
+    );
+    let row: Option<(String,)> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await
+        .context("cancelling job")?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Cancel every job of a batch that has not finished. Returns how many were affected.
+pub async fn cancel_batch(pool: &PgPool, batch_id: Uuid) -> anyhow::Result<u64> {
+    let sql = format!(
+        "UPDATE histdata_jobs SET \
+             status = CASE WHEN status = 'running' THEN 'cancelling' ELSE 'cancelled' END, \
+             finished_at = CASE WHEN status = 'running' THEN finished_at ELSE now() END, \
+             resume_at = NULL \
+         WHERE batch_id = $1 AND status IN {LIVE_STATUSES}"
+    );
+    let res = sqlx::query(AssertSqlSafe(sql))
+        .bind(batch_id)
+        .execute(pool)
+        .await
+        .context("cancelling batch")?;
+    Ok(res.rows_affected())
+}
+
+/// How a batch stands: one (status, count) row per status present.
+pub async fn batch_counts(pool: &PgPool, batch_id: Uuid) -> anyhow::Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT status, count(*) FROM histdata_jobs WHERE batch_id = $1 GROUP BY status",
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await
+    .context("counting batch jobs")?)
 }
 
 /// Persist progress mid-download so the page reflects it and a crash can resume.

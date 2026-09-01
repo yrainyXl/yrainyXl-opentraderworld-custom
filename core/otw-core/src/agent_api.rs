@@ -682,8 +682,12 @@ async fn update_conversation(
     if let Some(token) = body.mcp_token_id {
         // A set (non-null) token must exist — clear 400 instead of an FK 500.
         if let Some(tid) = token {
-            if otw_store::mcp::get_token(&state.pool, tid).await?.is_none() {
-                return Err(ApiError::bad_request("MCP token not found"));
+            match otw_store::mcp::get_token(&state.pool, tid).await? {
+                None => return Err(ApiError::bad_request("MCP token not found")),
+                Some(tok) if tok.is_expired() => {
+                    return Err(ApiError::bad_request("that MCP token has expired"))
+                }
+                Some(_) => {}
             }
         }
         if !store::set_conversation_token(&state.pool, id, token).await? {
@@ -893,6 +897,10 @@ async fn run(
     // (set in Settings → AI agents) apply directly; no token → pure chat.
     let mut tools = match conv.mcp_token_id {
         Some(token_id) => match otw_store::mcp::get_token(&state.pool, token_id).await? {
+            // An expired token degrades to chat exactly like a deleted one: the expiry is
+            // the user's own dead-man switch, and honouring it only on the network path
+            // would leave the in-app agent holding the access it was meant to end.
+            Some(tok) if tok.is_expired() => ToolContext::none(),
             Some(tok) => ToolContext {
                 permissions: tok.permissions,
                 token_name: tok.name,

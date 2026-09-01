@@ -1,24 +1,18 @@
 <script>
   // List of trades: every closed trade with entry/exit, size, PnL and
   // running cumulative PnL, plus a chip row summarising how trades ended. Newest last.
-  import { fmtNum } from './api.js';
+  import { fmtNum, EXIT_REASON_KEYS } from './api.js';
   import { t } from '$lib/i18n';
 
-  let { trades = [], exitReasons = {} } = $props();
+  // `onpick` makes a row a way back to the chart: clicking a trade frames it there. Without it
+  // the table stays a plain read.
+  let { trades = [], exitReasons = {}, onpick = null, picked = null } = $props();
 
   // Show the ticker column only for a multi-asset run (any trade carries a ticker).
   const showTicker = $derived(trades.some((t) => t.ticker));
 
-  const REASON_KEYS = {
-    signal: 'backtest.trades.reason.signal',
-    exit_signal: 'backtest.trades.reason.exitSignal',
-    stop_loss: 'backtest.trades.reason.stopLoss',
-    take_profit: 'backtest.trades.reason.takeProfit',
-    reverse: 'backtest.trades.reason.reverse',
-    end: 'backtest.trades.reason.end'
-  };
   const REASONS = $derived(
-    Object.fromEntries(Object.entries(REASON_KEYS).map(([k, key]) => [k, $t(key)]))
+    Object.fromEntries(Object.entries(EXIT_REASON_KEYS).map(([k, key]) => [k, $t(key)]))
   );
 
   // Filter by exit reason ('all' or a reason key). Cumulative PnL is computed over the full
@@ -102,7 +96,19 @@
       </thead>
       <tbody>
         {#each rows as tr (tr.n)}
-          <tr>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <tr
+            class:pick={!!onpick}
+            class:on={picked === tr.n}
+            tabindex={onpick ? 0 : undefined}
+            title={onpick ? $t('backtest.trades.showOnChart') : undefined}
+            onclick={() => onpick?.(tr)}
+            onkeydown={(e) => {
+              if (!onpick || (e.key !== 'Enter' && e.key !== ' ')) return;
+              e.preventDefault();
+              onpick(tr);
+            }}
+          >
             <td class="num">{tr.n}</td>
             {#if showTicker}<td class="left tk">{tr.ticker}</td>{/if}
             <td class="left side" class:short={tr.direction === 'short'}>{tr.direction}</td>
@@ -275,6 +281,23 @@
   }
   tbody tr:nth-child(even) {
     background: color-mix(in srgb, var(--surface) 45%, transparent);
+  }
+  /* A row is a way back to the chart: it says so on hover, and the one being shown keeps a mark. */
+  tbody tr.pick {
+    cursor: pointer;
+  }
+  tbody tr.pick:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  }
+  tbody tr.pick:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+  tbody tr.on td:first-child {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  tbody tr.on {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
   }
   .side {
     text-transform: capitalize;

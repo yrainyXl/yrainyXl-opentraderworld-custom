@@ -60,6 +60,7 @@ export default defineConfig({
           { text: 'Portfolios & wealth', link: '/modules/portfolio' },
           { text: 'News & research', link: '/modules/news-research' },
           { text: 'Notes & organization', link: '/modules/productivity' },
+          { text: 'Automator (workflows)', link: '/modules/automator' },
           { text: 'Agent (AI assistant)', link: '/modules/agent' }
         ]
       }

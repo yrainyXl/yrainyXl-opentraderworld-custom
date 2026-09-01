@@ -20,6 +20,7 @@ use otw_store::journal::{
     self, CategoryPatch, FeeScheduleInput, FeeSchedulePatch, StrategyPatch, TemplatePatch,
     TradeFilter, TradeInput,
 };
+use otw_store::journal_analytics::{self, TagInput, TagPatch};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -64,10 +65,17 @@ pub fn routes() -> Router<AppState> {
             "/api/journal/trades/{id}",
             get(get_trade).patch(update_trade).delete(delete_trade),
         )
+        // Tags (mistakes / rules / setups)
+        .route("/api/journal/tags", get(list_tags).post(add_tag))
+        .route("/api/journal/tags/{id}", patch(update_tag).delete(delete_tag))
         // Autocomplete
         .route("/api/journal/trade-suggestions", get(trade_suggestions))
         // Breakdown
         .route("/api/journal/breakdown", get(breakdown))
+        // Analytics — R-multiples, streaks, distributions, per-group tables, mistakes
+        .route("/api/journal/analytics", get(analytics))
+        // Period vs period
+        .route("/api/journal/compare", get(compare))
         // Calendar — daily PnL heatmap (read-only aggregation)
         .route("/api/journal/calendar", get(calendar))
         // Export: raw trades as CSV + periodic performance report (Markdown/PDF)
@@ -415,6 +423,7 @@ struct TradeQuery {
     side: Option<String>,
     ticker: Option<String>,
     signal_name: Option<String>,
+    tag_id: Option<Uuid>,
     since: Option<String>,
     until: Option<String>,
 }
@@ -441,6 +450,7 @@ impl TradeQuery {
             side: empty_to_none(self.side),
             ticker: empty_to_none(self.ticker),
             signal_name: empty_to_none(self.signal_name),
+            tag_id: self.tag_id,
             since: parse_dt(&self.since)?,
             until: parse_dt(&self.until)?,
         })
@@ -554,6 +564,144 @@ async fn delete_trade(
         return Err(ApiError::not_found("trade not found"));
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+// ── Tags (mistakes / rules / setups) ─────────────────────────────────────────
+
+async fn list_tags(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let tags = journal_analytics::list_tags(&state.pool).await?;
+    Ok(Json(json!({ "tags": tags })))
+}
+
+fn validate_tag_kind(kind: &str) -> Result<(), ApiError> {
+    if !journal_analytics::TAG_KINDS.contains(&kind) {
+        return Err(ApiError::bad_request("kind must be mistake, rule or setup"));
+    }
+    Ok(())
+}
+
+async fn add_tag(
+    State(state): State<AppState>,
+    Json(input): Json<TagInput>,
+) -> Result<Json<Value>, ApiError> {
+    if input.name.trim().is_empty() {
+        return Err(ApiError::bad_request("tag name required"));
+    }
+    validate_tag_kind(&input.kind)?;
+    let tag = journal_analytics::add_tag(&state.pool, &input)
+        .await
+        // The only unique constraint on the table is the name, so a conflict can only
+        // mean this one; say so instead of leaking a 500.
+        .map_err(|e| {
+            if e.to_string().contains("idx_journal_tags_name") {
+                ApiError::bad_request("a tag with this name already exists")
+            } else {
+                ApiError::from(e)
+            }
+        })?;
+    Ok(Json(json!({ "tag": tag })))
+}
+
+async fn update_tag(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<TagPatch>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(name) = &patch.name {
+        if name.trim().is_empty() {
+            return Err(ApiError::bad_request("tag name required"));
+        }
+    }
+    if let Some(kind) = &patch.kind {
+        validate_tag_kind(kind)?;
+    }
+    if !journal_analytics::update_tag(&state.pool, id, &patch).await? {
+        return Err(ApiError::not_found("tag not found"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn delete_tag(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    if !journal_analytics::delete_tag(&state.pool, id).await? {
+        return Err(ApiError::not_found("tag not found"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ── Analytics ────────────────────────────────────────────────────────────────
+
+/// R-multiples, streaks, daily risk ratios, distributions, per-group tables and the
+/// cost of tagged mistakes, over the same filter set as the breakdown. Time buckets
+/// (hour, weekday, day boundaries) use the viewer's zone, like the calendar.
+async fn analytics(
+    State(state): State<AppState>,
+    Query(q): Query<TradeQuery>,
+    Query(cal): Query<CalendarQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let filter = q.into_filter()?;
+    let tz_offset = cal.tz_offset.clamp(-840, 840);
+    let settings = journal::get_settings(&state.pool).await?;
+    let data = journal_analytics::analytics(
+        &state.pool,
+        &filter,
+        &settings.display_currency,
+        tz_offset,
+    )
+    .await?;
+    Ok(Json(json!({ "analytics": data })))
+}
+
+// ── Period comparison ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CompareQuery {
+    /// day | week | month | quarter | year | custom
+    #[serde(default = "default_compare_period")]
+    period: String,
+    /// Any date inside the wanted period (YYYY-MM-DD, default: today in the viewer's zone).
+    anchor: Option<String>,
+}
+fn default_compare_period() -> String {
+    "month".to_string()
+}
+
+/// One period against the one before it, plus a strip of the last twelve. `custom`
+/// compares the filter's own date range against the same length immediately before.
+async fn compare(
+    State(state): State<AppState>,
+    Query(q): Query<TradeQuery>,
+    Query(cal): Query<CalendarQuery>,
+    Query(cmp): Query<CompareQuery>,
+) -> Result<Json<Value>, ApiError> {
+    use time::macros::format_description;
+
+    if !journal_analytics::PERIODS.contains(&cmp.period.as_str()) {
+        return Err(ApiError::bad_request(
+            "period must be day, week, month, quarter, year or custom",
+        ));
+    }
+    let filter = q.into_filter()?;
+    let tz_offset = cal.tz_offset.clamp(-840, 840);
+    let anchor = match &cmp.anchor {
+        Some(s) if !s.is_empty() => time::Date::parse(s, format_description!("[year]-[month]-[day]"))
+            .map_err(|_| ApiError::bad_request("anchor must be YYYY-MM-DD"))?,
+        // Default anchor is "today" as the viewer sees it, not UTC today.
+        _ => (OffsetDateTime::now_utc() - time::Duration::minutes(tz_offset as i64)).date(),
+    };
+    let settings = journal::get_settings(&state.pool).await?;
+    let data = journal_analytics::compare(
+        &state.pool,
+        &filter,
+        &cmp.period,
+        anchor,
+        &settings.display_currency,
+        tz_offset,
+    )
+    .await?;
+    Ok(Json(json!({ "comparison": data })))
 }
 
 // ── Autocomplete ─────────────────────────────────────────────────────────────
@@ -757,6 +905,7 @@ async fn periodic_report(
         side: empty_to_none(q.side),
         ticker: empty_to_none(q.ticker),
         signal_name: empty_to_none(q.signal_name),
+        tag_id: None,
         since: Some(start),
         // The shared filter is inclusive on both ends; step just inside the period.
         until: Some(end - time::Duration::microseconds(1)),

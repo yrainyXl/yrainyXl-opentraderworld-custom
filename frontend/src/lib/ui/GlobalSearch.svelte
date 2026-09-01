@@ -51,6 +51,7 @@
   function toggleDeep() {
     deep = !deep;
     localStorage.setItem(DEEP_KEY, deep ? '1' : '0');
+    open = true;
     inputEl?.focus();
   }
 
@@ -176,8 +177,13 @@
     }
   }
 
+  // Only a click that landed outside closes the panel. A target already detached
+  // from the document was removed by our own handler (the deep hint, the clear
+  // button): it was inside, so it must not read as an outside click.
   function onWindowClick(e) {
-    if (rootEl && !rootEl.contains(e.target)) open = false;
+    const el = e.target;
+    if (el instanceof Node && !el.isConnected) return;
+    if (rootEl && !rootEl.contains(el)) open = false;
   }
 
   // Emphasize the matched substring inside a hit name.
@@ -202,6 +208,7 @@
     aria-controls="gsearch-list"
     aria-activedescendant={items[cursor] ? `gsearch-opt-${cursor}` : undefined}
     onfocus={() => (open = true)}
+    oninput={() => (open = true)}
     onkeydown={onKey}
   />
   <div class="gs-actions">

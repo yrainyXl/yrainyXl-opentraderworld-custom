@@ -13,7 +13,8 @@
     title = undefined,
     defaultOp = 'crosses_above',
     emptyHint = '',
-    customIndicators = []
+    customIndicators = [],
+    positions = false
   } = $props();
 
   const titleText = $derived(title ?? $t('backtest.signalGroup.entry'));
@@ -54,7 +55,7 @@
         >{group.logic === 'any' ? 'OR' : 'AND'}</button>
     {/if}
     <div class="cond">
-      <OperandEditor bind:operand={c.left} {customIndicators} />
+      <OperandEditor bind:operand={c.left} {customIndicators} {positions} />
       <div class="op">
         <Dropdown
           value={c.op}
@@ -64,7 +65,7 @@
         />
       </div>
       {#if opIsBinary(c.op) && c.right}
-        <OperandEditor bind:operand={c.right} {customIndicators} />
+        <OperandEditor bind:operand={c.right} {customIndicators} {positions} />
       {/if}
       <button type="button" class="rm" title={$t('backtest.signalGroup.removeRule')} onclick={() => remove(i)}>
         <Icon name="x" size={12} />
@@ -98,7 +99,7 @@
     align-items: center;
     gap: 3px;
     background: transparent;
-    border: 1px dashed var(--border);
+    border: var(--hairline) dashed var(--border-control);
     border-radius: 0;
     color: var(--muted);
     font-size: var(--text-xs);
@@ -107,7 +108,7 @@
   }
   .add:hover {
     color: var(--text);
-    border-color: var(--border-control);
+    border-style: solid;
   }
   .hint {
     font-size: var(--text-xs);
@@ -136,9 +137,9 @@
     flex-wrap: wrap;
     gap: var(--space-1);
     background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: var(--space-2);
+    border: var(--hairline) solid var(--border);
+    border-radius: 0;
+    padding: var(--space-1) var(--space-2);
   }
   .op {
     width: 132px;
@@ -154,7 +155,7 @@
     color: var(--muted);
     cursor: pointer;
     padding: var(--space-1);
-    border-radius: var(--radius);
+    border-radius: 0;
   }
   .rm:hover {
     color: var(--red);

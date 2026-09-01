@@ -4,18 +4,42 @@
 //! unreachable via MCP regardless of token permissions. Deliberately excluded:
 //! account/session/settings/network admin, secret management (feed + provider API
 //! keys, notification channels), data wipe, module install/detach, logs, binary
-//! file upload/download, SSE streams, the FinanceDatabase bulk import, and the
-//! community-docs external submission relay.
+//! file upload/download, SSE streams, the FinanceDatabase bulk import, the
+//! community-docs external submission relay, the in-app agent (it holds provider
+//! keys and would reach this gateway back), inbound-webhook management (it mints
+//! secrets), and the two bulk importers (journal, portfolios).
+//!
+//! The Automator is here for the authoring half only: read a workflow, create one, save a
+//! graph, test it. Running one, restoring a revision, deleting one, and every schedule
+//! endpoint stay out, because a workflow executes under its own `mcp_tokens` envelope and
+//! a caller that could both write a graph and set it running would inherit whatever that
+//! envelope grants, whatever its own token says. `automator_api` completes the split: an
+//! automated graph save lands in the draft the engine never reads, so what runs is always
+//! a graph a human saved.
+//!
+//! Binary responses stay out for a mechanical reason: the gateway stringifies a
+//! response body with `from_utf8_lossy`, so a PDF arrives as mojibake. That is why
+//! a run report is reachable as `report.md` and not as `report.pdf`.
 //!
 //! `module` is the permission key tokens are scoped by (aligned with the frontend
 //! module ids). GET needs `"r"`; other methods need `"rw"`.
+//!
+//! Some responses carry text nobody here wrote: feed articles, incoming mail. Those
+//! paths are listed in [`UNTRUSTED_PATHS`] and the gateway fences their body before the
+//! model sees it.
+//!
+//! One key is not a module: `search` reads titles across every module at once, so
+//! granting it is granting title-level read everywhere, whatever the other keys say.
+//! It is separate precisely so that decision is taken on purpose.
 //!
 //! Request-body contract: every POST/PUT/PATCH entry carries a JSON Schema generated
 //! (via schemars) from the exact struct its Axum handler deserializes, so what the
 //! catalog advertises is what serde accepts — the schema cannot drift from the code.
 //! The constructors enforce this at compile time: `post`/`put`/`patch` require a
 //! schema, and a write endpoint that genuinely takes no body must say so with
-//! `post_empty`. GET/DELETE never take a body.
+//! `post_empty`. A GET never takes a body; a DELETE only does through
+//! `delete_body`, for the handful of handlers that identify their target by payload
+//! rather than by path.
 
 use serde_json::Value;
 
@@ -30,8 +54,10 @@ pub struct Endpoint {
     /// JSON Schema of the request body; `None` = the endpoint takes no body.
     pub body: Option<BodySchema>,
     /// A POST that computes rather than mutates: it answers a question and changes nothing
-    /// the user would miss. These skip the agent's write-confirmation step — asking someone
-    /// to approve a Sharpe ratio trains them to click through the prompt that matters.
+    /// the user would miss. These skip the write-confirmation step — asking someone to
+    /// approve a Sharpe ratio trains them to click through the prompt that matters. Remote
+    /// clients reach them through the `otw_compute` tool, the in-app agent reads this flag
+    /// directly; both consult the same list.
     ///
     /// `/backtest/run` and `/backtest/sweep` count as compute even though they append to the
     /// run history: that history is the agent's own audit trail, prunable in one click, and
@@ -62,6 +88,16 @@ const fn get(module: &'static str, path: &'static str, desc: &'static str) -> En
 
 const fn delete(module: &'static str, path: &'static str, desc: &'static str) -> Endpoint {
     Endpoint { module, method: "DELETE", path, desc, body: None, compute: false }
+}
+
+/// A DELETE whose target is named by the request body, not by the path.
+const fn delete_body(
+    module: &'static str,
+    path: &'static str,
+    desc: &'static str,
+    body: BodySchema,
+) -> Endpoint {
+    Endpoint { module, method: "DELETE", path, desc, body: Some(body), compute: false }
 }
 
 const fn post(
@@ -142,6 +178,8 @@ pub const MODULES: &[(&str, &str)] = &[
     ("prompt-store", "Prompt Store"),
     ("community-docs", "Community Docs"),
     ("mailbox", "Mailbox"),
+    ("automator", "Automator"),
+    ("search", "Global search"),
 ];
 
 pub const CATALOG: &[Endpoint] = &[
@@ -154,6 +192,12 @@ pub const CATALOG: &[Endpoint] = &[
     get("journal", "/api/journal/trade-suggestions", "Autocomplete values seen in past trades (symbols…)."),
     get("journal", "/api/journal/breakdown", "Stats/PnL breakdown. Query: from, to, category_id, group (day|week|month|strategy|symbol…)."),
     get("journal", "/api/journal/calendar", "Daily realized-PnL buckets for the month-grid heatmap. Same filters as breakdown."),
+    get("journal", "/api/journal/analytics", "R-multiples, streaks, Sharpe/Sortino, hold-time / hour / weekday / size distributions, per-strategy-symbol-tag tables and the cost of tagged mistakes. Same filters as breakdown, plus tz_offset."),
+    get("journal", "/api/journal/compare", "One period against the previous one plus a 12-period strip. Query: period (day|week|month|quarter|year|custom), anchor, tz_offset, same filters as breakdown."),
+    get("journal", "/api/journal/tags", "List discipline tags (kind: mistake | rule | setup) with their trade counts."),
+    post("journal", "/api/journal/tags", "Create a discipline tag.", schema::<otw_store::journal_analytics::TagInput>),
+    patch("journal", "/api/journal/tags/{id}", "Update a discipline tag.", schema::<otw_store::journal_analytics::TagPatch>),
+    delete("journal", "/api/journal/tags/{id}", "Delete a discipline tag."),
     get("journal", "/api/journal/categories", "List trade categories (accounts/books)."),
     post("journal", "/api/journal/categories", "Create a category.", schema::<crate::journal_api::CategoryBody>),
     patch("journal", "/api/journal/categories/{id}", "Update a category.", schema::<otw_store::journal::CategoryPatch>),
@@ -175,6 +219,7 @@ pub const CATALOG: &[Endpoint] = &[
     delete("journal", "/api/journal/fee-schedules/{id}", "Delete a fee schedule."),
     get("journal", "/api/journal/settings", "Journal settings (display currency…)."),
     patch("journal", "/api/journal/settings", "Update journal settings.", schema::<crate::journal_api::SettingsBody>),
+    get("journal", "/api/journal/export/trades.csv", "Every trade of the filtered set as CSV text (same filters as /trades). Large: prefer /breakdown or /report unless the raw rows are the point."),
     get("journal", "/api/journal/fx/pending", "FX conversions awaiting a manual rate."),
     get("journal", "/api/journal/fx/quotes", "Latest FX quotes (USD-based)."),
     get("journal", "/api/journal/fx/rates/{date}", "FX rates on a date (YYYY-MM-DD)."),
@@ -196,7 +241,7 @@ pub const CATALOG: &[Endpoint] = &[
     delete("portfolios", "/api/portfolios/operations/{op_id}", "Delete an operation."),
     // ── backtest ─────────────────────────────────────────────────────────────
     // Read/run + strategy & custom-indicator authoring (creator surface).
-    compute_post("backtest", "/api/backtest/run", "Run a backtest (strategy config + one or more datasets). Pass view=\"summary\": the default \"full\" also returns every trade and the whole equity curve, which overflows the response budget on a long dataset. Summary returns stats, per-asset breakdown, alignment and run_id. Every run is recorded in the history automatically; name it via POST /api/backtest/runs with that run_id to keep it permanently.\n\nUNITS inside `settings` — the two families do NOT share a scale, and the `_pct` suffix does not tell them apart. Get a worked example from GET /api/backtest/strategies/{id} before composing one by hand.\nFRACTIONS (0.01 = 1%): long/short.stop_loss_pct, long/short.take_profit_pct, stop_loss.value + take_profit.value when kind=\"pct\", slippage.value when kind=\"pct\", spread_pct, pyramiding min_distance_pct, oos_split_pct. A realistic crypto slippage is 0.0005 (=0.05%); 0.05 here means 5% per fill and will wipe the account.\nPERCENTS (10 = 10%): sizing.percent, sizing.risk_pct, sizing cap_pct, risk.max_exposure_pct, risk.max_exposure_per_asset_pct, risk.max_daily_loss_pct, risk.max_drawdown_pct, funding.annual_rate_pct. Also fees.amount when amount_kind=\"pct\". sizing.fraction (Kelly) is a true fraction (0.5 = half Kelly); equity_tiers value follows its `metric`.\nEvery run echoes the settings it used back in the report — check the echoed slippage/spread/sizing against what you intended before trusting a result.\n\nEXITS — `exit_on_reverse` means \"close as soon as the entry group stops holding\". With a crossover entry (crosses_above / crosses_below / cross) the group holds only on the bar of the cross, so the position is closed on the next bar and EVERY trade lasts one bar. Pair a crossover entry with an explicit `exit` group instead, and check `avg_bars_held` and `exit_reasons` in the result before believing any figure. The response carries a `warnings` array for exactly this kind of configuration — read it.\n\nWINDOWING — `from`/`to` restrict the simulated span (\"YYYY-MM-DD\" or RFC3339; a plain end date covers that whole day). This is how you do walk-forward and regime slices: run the same settings over consecutive windows and compare. The window is recorded with the run, so a later report or Monte-Carlo replays the same span. Note `limit` keeps the MOST RECENT bars of the window, so leave it alone unless you mean to truncate.", schema::<crate::backtest_api::RunBody>),
+    compute_post("backtest", "/api/backtest/run", "Run a backtest (strategy config + one or more datasets). Pass view=\"summary\": the default \"full\" also returns every trade and the whole equity curve, which overflows the response budget on a long dataset. Summary returns stats, per-asset breakdown, alignment and run_id. Every run is recorded in the history automatically; name it via POST /api/backtest/runs with that run_id to keep it permanently.\n\nUNITS inside `settings` — the two families do NOT share a scale, and the `_pct` suffix does not tell them apart. Get a worked example from GET /api/backtest/strategies/{id} before composing one by hand.\nFRACTIONS (0.01 = 1%): long/short.stop_loss_pct, long/short.take_profit_pct, stop_loss.value + take_profit.value when kind=\"pct\", slippage.value when kind=\"pct\", spread_pct, pyramiding min_distance_pct, oos_split_pct. A realistic crypto slippage is 0.0005 (=0.05%); 0.05 here means 5% per fill and will wipe the account.\nPERCENTS (10 = 10%): sizing.percent, sizing.risk_pct, sizing cap_pct, risk.max_exposure_pct, risk.max_exposure_per_asset_pct, risk.max_daily_loss_pct, risk.max_drawdown_pct, funding.annual_rate_pct. Also fees.amount when amount_kind=\"pct\". sizing.fraction (Kelly) is a true fraction (0.5 = half Kelly); equity_tiers value follows its `metric`.\nEvery run echoes the settings it used back in the report — check the echoed slippage/spread/sizing against what you intended before trusting a result.\n\nEXITS — `exit_on_reverse` means \"close as soon as the entry group stops holding\". With a crossover entry (crosses_above / crosses_below / cross) the group holds only on the bar of the cross, so the position is closed on the next bar and EVERY trade lasts one bar. Pair a crossover entry with an explicit `exit` group instead, and check `avg_bars_held` and `exit_reasons` in the result before believing any figure. The response carries a `warnings` array for exactly this kind of configuration — read it.\n\nDCA MODE — `kind`:\"dca\" is a savings plan, not a strategy, and it reads a `dca` object instead of `long`/`short`: `weights` (one row per ticker, any scale, normalised), `contribution` ({amount, period bar|day|week|month|quarter|year, every, invest}), `buys` and `sells`. `sizing`, `pyramiding`, `leverage`, `risk` and `oos_split_pct` are NOT read in this mode (a non-zero split is refused). A buy rule's `amount_kind` is fixed|pct_cash|pct_equity|pct_invested, a sell rule's is pct_position|all|units|amount, and an unknown value is refused rather than defaulted. `target_gain_pct` and every `pct_*` amount are PERCENTS (20 = 20%). `starting_capital` is bought at each asset's first bar; contributions and conditional tranches are new money on top, so `contributed` (not `starting_capital`) is the denominator of `return_pct`. Two operand families exist only here: `metric` (dd_from_high, up_from_low, change_pct, change_from_start) and `position` (pnl_pct, since_last_buy_pct, avg_cost, units, value, weight_pct, cash_pct, drawdown_pct). Read the `dca` block of the result, not the trade statistics: a plan that only sells at a profit has a 100% win rate by construction. Judge it on `twr_pct` (deposit-proof) and `irr_pct`, against `lump_sum_return_pct`.\n\nWINDOWING — `from`/`to` restrict the simulated span (\"YYYY-MM-DD\" or RFC3339; a plain end date covers that whole day). This is how you do walk-forward and regime slices: run the same settings over consecutive windows and compare. The window is recorded with the run, so a later report or Monte-Carlo replays the same span. Note `limit` keeps the MOST RECENT bars of the window, so leave it alone unless you mean to truncate.", schema::<crate::backtest_api::RunBody>),
     compute_post("backtest", "/api/backtest/sweep", "Run a parameter grid server-side and get EVERY trial back. Body: the same dataset/settings/from/to as /run, plus `grid` = {\"<dot.path.into.settings>\": [values…]} — e.g. {\"long.stop_loss_pct\": [0.01,0.02,0.03], \"sizing.percent\": [10,25]} is 6 trials. Max 4 axes, 64 trials. Units follow /api/backtest/run exactly; a grid value is written into settings verbatim, so a fraction stays a fraction.\n\nUse this instead of looping /run yourself. It is one tool round instead of N, and it makes the trial count part of the result rather than something you have to remember to mention.\n\nThe response is the trial table (params + stats + oos per trial, plus run_id when record=true), the spread of trial Sharpes, and `deflated_sharpe`: the Sharpe the BEST of N worthless strategies would be expected to reach, given how much these trials varied. When `selection_explains_it` is true the winner is inside the noise of having tried N times — report that as no evidence of an edge. Never present the best trial as expected performance; report the spread with it.", schema::<crate::backtest_api::SweepBody>),
     compute_post("backtest", "/api/backtest/align", "Multi-asset alignment preview (no simulation): merged-clock length, overlap window, warm-up bars, per-asset inactive bars. Takes the same from/to window as /run — pass it, or the preview describes a different span than the run it is warning you about.", schema::<crate::backtest_api::AlignBody>),
     get("backtest", "/api/backtest/runs", "Run history, newest first (every run lands here automatically). Query: filter=saved for the named/pinned runs only."),
@@ -210,6 +255,15 @@ pub const CATALOG: &[Endpoint] = &[
     get("backtest", "/api/backtest/strategies/{id}", "Get one strategy with its full settings (feed straight to /run)."),
     put("backtest", "/api/backtest/strategies/{id}", "Update a strategy.", schema::<crate::backtest_api::StrategyBody>),
     delete("backtest", "/api/backtest/strategies/{id}", "Delete a strategy."),
+    // Optimizer: the grid as a job. `/sweep` (64 trials, one response) is still the right
+    // tool for a quick question; this is for the five-figure grids the screen runs.
+    compute_post("backtest", "/api/backtest/optimize/params", "Which parameters of a strategy a grid can vary: every settings path that exists, the value it holds today, its unit and a suggested sweep. Body: strategy_id (from /api/backtest/strategies) or settings. START HERE. An axis path is not validated against the settings: a path with a typo is written in as a dead key, and the grid then runs the base strategy N times and reports it as a result.", schema::<crate::backtest_optimize_api::ParamsBody>),
+    compute_post("backtest", "/api/backtest/optimize/estimate", "Count the variants and time one of them, for real: it loads the bars and runs variant 0, so \"43 minutes\" comes from this machine and this strategy. Writes nothing, starts nothing. Same body as /optimize. Call it before /optimize and tell the user the number.", schema::<crate::backtest_optimize_api::GridBody>),
+    post("backtest", "/api/backtest/optimize", "Start the grid; returns a job id. This takes every core for minutes: run /optimize/estimate first and let the user approve the wait. One job at a time (a second call is refused while one runs). Body: dataset_ids + settings + axes (paths from /optimize/params, values in engine units) + optional from/to/limit/metric.", schema::<crate::backtest_optimize_api::GridBody>),
+    get("backtest", "/api/backtest/optimize", "Optimizer jobs held in memory (id, state, progress). Nothing is persisted: a finished job is gone at the next restart, so keep a result by re-running its variant through /api/backtest/run and naming it."),
+    get("backtest", "/api/backtest/optimize/{id}", "Progress plus one page of the ranking. Query: sort (metric), dir, offset, limit (max 500), analysis=1 for the per-axis sensitivity. The full grid is never serialized: page it."),
+    post_empty("backtest", "/api/backtest/optimize/{id}/cancel", "Stop a running job. What it already computed stays readable."),
+    delete("backtest", "/api/backtest/optimize/{id}", "Forget a job and its rows."),
     get("backtest", "/api/backtest/indicators", "List saved custom indicators (node-graph definitions)."),
     post("backtest", "/api/backtest/indicators", "Create a custom indicator (node-graph DAG JSON; validated: bounded, no forward/self refs). Returns id.", schema::<crate::backtest_api::IndicatorBody>),
     get("backtest", "/api/backtest/indicators/{id}", "Get one custom-indicator definition."),
@@ -220,6 +274,7 @@ pub const CATALOG: &[Endpoint] = &[
     compute_post("quant", "/api/quant/kelly", "Kelly criterion sizing.", schema::<crate::quant_api::KellyBody>),
     compute_post("quant", "/api/quant/size", "Position sizing calculator.", schema::<crate::quant_api::SizeBody>),
     compute_post("quant", "/api/quant/asset-signals", "Technical signals for an asset.", schema::<crate::quant_api::AssetSignalsBody>),
+    compute_post("quant", "/api/quant/seasonality", "Calendar breakdown of an asset's returns (by month, weekday and hour where the timeframe allows), with the sample size behind each bucket. Read the counts before the averages: a \"best month\" drawn from four observations is noise.", schema::<crate::quant_api::SeasonalityBody>),
     compute_post("quant", "/api/quant/portfolio", "Portfolio-level metrics (correlations, vol, drawdown…). Large response — pick the metric fields the user asked for.", schema::<crate::quant_api::PortfolioBody>),
     // ── histdata ─────────────────────────────────────────────────────────────
     get("histdata", "/api/histdata/datasets", "List downloaded datasets."),
@@ -231,6 +286,9 @@ pub const CATALOG: &[Endpoint] = &[
     compute_post("histdata", "/api/histviz/series", "One window of an instrument for charting: bars already stored are read from the catalog and only the missing edges are fetched through the connector. Stores nothing. Body: coordinates + `to` (RFC3339 exclusive upper bound, default now) + `bars` (slice size, default 1500). Walk backwards through history by passing the previous slice's oldest timestamp as `to`. `history_start` means the provider serves nothing older; `notice` carries the reason when a window came back short (auth, quota, rate_limit, depth, symbol).", schema::<crate::histdata_api::SeriesBody>),
     post_empty("histdata", "/api/histdata/datasets/{id}/append", "Extend a dataset with newer bars (from its last bar to now)."),
     get("histdata", "/api/histdata/jobs", "Download queue/job status."),
+    delete("histdata", "/api/histdata/jobs/{id}", "Cancel one queued or running download."),
+    delete("histdata", "/api/histdata/jobs/batch/{id}", "Cancel every job of a batch (one row per symbol of a multi-symbol download)."),
+    get("histdata", "/api/histdata/datasets/{id}/export", "The dataset's bars as CSV text. Large: /datasets/{id}/bars with from/to/limit is the normal read."),
     delete("histdata", "/api/histdata/datasets/{id}", "Delete a dataset."),
     // ── connectors (data broker) ─────────────────────────────────────────────
     // Read-only on purpose: creating connectors and setting credentials handles secrets,
@@ -258,9 +316,13 @@ pub const CATALOG: &[Endpoint] = &[
     patch("watchlists", "/api/watchlists/{id}", "Update a watchlist (name, description, sync, refresh cadence, quote source).", schema::<crate::watchlists_api::UpdateBody>),
     delete("watchlists", "/api/watchlists/{id}", "Delete a watchlist and its items."),
     post("watchlists", "/api/watchlists/{id}/items", "Add a symbol.", schema::<crate::watchlists_api::AddItemBody>),
-    patch("watchlists", "/api/watchlists/items/{id}", "Update an item (notes, position, quote overrides).", schema::<crate::watchlists_api::PatchItemBody>),
-    delete("watchlists", "/api/watchlists/items/{id}", "Remove an item."),
+    patch("watchlists", "/api/watchlists/items/{item_id}", "Update an item (notes, position, quote overrides).", schema::<crate::watchlists_api::PatchItemBody>),
+    delete("watchlists", "/api/watchlists/items/{item_id}", "Remove an item."),
     post_empty("watchlists", "/api/watchlists/{id}/refresh", "Re-quote every item now."),
+    post("watchlists", "/api/watchlists/{id}/import", "Copy a Portfolio Tracker portfolio's assets onto the watchlist. Upserts: symbols already there are refreshed, not duplicated.", schema::<crate::watchlists_api::ImportBody>),
+    post("watchlists", "/api/watchlists/items/{item_id}/alerts", "Create a price alert on an item: metric + direction + threshold, optional basis/window/repeat/cooldown, and the notification channels to push to. A channel the Watchlists module is not granted is refused, so read /api/notif-channels first (that endpoint is not on this gateway: ask the user for the channel ids).", schema::<otw_store::watchlist_alerts::AlertInput>),
+    patch("watchlists", "/api/watchlists/alerts/{alert_id}", "Update an alert (same full payload as create).", schema::<otw_store::watchlist_alerts::AlertInput>),
+    delete("watchlists", "/api/watchlists/alerts/{alert_id}", "Delete an alert."),
     // ── mportfolios ──────────────────────────────────────────────────────────
     get("mportfolios", "/api/mportfolios", "List famous managers' portfolios (Dataroma cache)."),
     get("mportfolios", "/api/mportfolios/{slug}", "One manager's holdings."),
@@ -269,6 +331,7 @@ pub const CATALOG: &[Endpoint] = &[
     post("mportfolios", "/api/mportfolios/snapshots", "Snapshot current holdings for comparison.", schema::<crate::mportfolios_api::SnapshotBody>),
     get("mportfolios", "/api/mportfolios/snapshots/{id}", "Snapshot detail."),
     delete("mportfolios", "/api/mportfolios/snapshots/{id}", "Delete a snapshot."),
+    delete("mportfolios", "/api/mportfolios/snapshots/by-slug/{slug}", "Delete every snapshot of one manager."),
     // ── wealth ───────────────────────────────────────────────────────────────
     get("wealth", "/api/wealth/assets", "List wealth assets (accounts, property, holdings…)."),
     post("wealth", "/api/wealth/assets", "Add an asset.", schema::<otw_store::wealth::AssetInput>),
@@ -292,6 +355,7 @@ pub const CATALOG: &[Endpoint] = &[
     patch("subscriptions", "/api/subscriptions/{id}", "Update a subscription.", schema::<otw_store::subscriptions::SubscriptionInput>),
     delete("subscriptions", "/api/subscriptions/{id}", "Delete a subscription."),
     get("subscriptions", "/api/subscriptions/breakdown", "Cost breakdown (monthly/yearly, by category)."),
+    get("subscriptions", "/api/subscriptions/suggestions", "Known services the user could be paying for, to seed a subscription."),
     get("subscriptions", "/api/subscriptions/settings", "Subscription settings."),
     patch("subscriptions", "/api/subscriptions/settings", "Update settings.", schema::<crate::subscriptions_api::SettingsBody>),
     // ── taxcalc ──────────────────────────────────────────────────────────────
@@ -302,6 +366,7 @@ pub const CATALOG: &[Endpoint] = &[
     put("taxcalc", "/api/taxcalc/profiles/{id}", "Update a profile.", schema::<crate::taxcalc_api::ProfileBody>),
     delete("taxcalc", "/api/taxcalc/profiles/{id}", "Delete a profile."),
     compute_post("taxcalc", "/api/taxcalc/compute", "Stateless tax computation from inputs.", schema::<crate::taxcalc_api::ScenarioBody>),
+    compute_post("taxcalc", "/api/taxcalc/scenarios/{id}/compute", "Run the engine against a profile and scenario inputs and return the result. Persists nothing: saving to history is POST /scenarios. The {id} in the path is ignored, the body carries everything.", schema::<crate::taxcalc_api::ScenarioBody>),
     get("taxcalc", "/api/taxcalc/scenarios", "List saved scenarios."),
     post("taxcalc", "/api/taxcalc/scenarios", "Create a scenario.", schema::<crate::taxcalc_api::ScenarioBody>),
     get("taxcalc", "/api/taxcalc/scenarios/{id}", "Scenario detail."),
@@ -315,6 +380,7 @@ pub const CATALOG: &[Endpoint] = &[
     patch("editor", "/api/documents/{id}", "Update title/content.", schema::<crate::documents::UpdateBody>),
     delete("editor", "/api/documents/{id}", "Delete a document."),
     post("editor", "/api/documents/{id}/move", "Move in the tree.", schema::<crate::documents::MoveBody>),
+    post("editor", "/api/documents/{id}/flag", "Set or clear a document's colour flag in the tree.", schema::<crate::documents::FlagBody>),
     get("editor", "/api/databases/{id}", "Load an editor database (columns + rows)."),
     post("editor", "/api/databases/{id}/columns", "Add a column.", schema::<crate::databases::AddColumnBody>),
     patch("editor", "/api/databases/columns/{col_id}", "Update a column.", schema::<otw_store::databases::ColumnPatch>),
@@ -336,6 +402,7 @@ pub const CATALOG: &[Endpoint] = &[
     get("goals", "/api/goals/{id}", "Goal detail."),
     patch("goals", "/api/goals/{id}", "Update a goal / progress.", schema::<otw_store::goals::GoalInput>),
     delete("goals", "/api/goals/{id}", "Delete a goal."),
+    post("goals", "/api/goals/{id}/position", "Reorder a goal in the list.", schema::<crate::goals_api::PositionBody>),
     // ── remindme ─────────────────────────────────────────────────────────────
     get("remindme", "/api/reminders", "List reminders."),
     post("remindme", "/api/reminders", "Create a reminder (one-shot or recurring).", schema::<otw_store::reminders::ReminderInput>),
@@ -346,6 +413,7 @@ pub const CATALOG: &[Endpoint] = &[
     get("remindme", "/api/notifications/unread", "Unread count."),
     post_empty("remindme", "/api/notifications/ack-all", "Mark all read."),
     post_empty("remindme", "/api/notifications/{id}/read", "Mark one read."),
+    delete("remindme", "/api/notifications/{id}", "Delete one notification."),
     // ── calendar ─────────────────────────────────────────────────────────────
     get("calendar", "/api/calendar/events", "List events. Query: from, to."),
     post("calendar", "/api/calendar/events", "Create an event.", schema::<otw_store::calendar::CalendarEventInput>),
@@ -363,6 +431,10 @@ pub const CATALOG: &[Endpoint] = &[
     get("time", "/api/time/projects/{id}/entries", "List entries for a project."),
     post("time", "/api/time/projects/{id}/entries", "Add a manual entry.", schema::<crate::time_api::CreateEntryBody>),
     delete("time", "/api/time/entries/{id}", "Delete an entry."),
+    post("time", "/api/time/projects/{id}/position", "Reorder a project.", schema::<crate::time_api::PositionBody>),
+    post_empty("time", "/api/time/heartbeat", "Keep the running timer alive (the UI beats while the tab is open)."),
+    post_empty("time", "/api/time/revert", "Undo the last start/stop."),
+    patch("time", "/api/time/settings", "Update time-tracker settings (hourly cost, rounding…).", schema::<crate::time_api::SettingsBody>),
     get("time", "/api/time/state", "Current running timer, if any."),
     get("time", "/api/time/breakdown", "Tracked-time breakdown."),
     // ── routines (trader board) ──────────────────────────────────────────────
@@ -370,7 +442,14 @@ pub const CATALOG: &[Endpoint] = &[
     get("routines", "/api/trader/routines", "List routine templates with their checklist items."),
     get("routines", "/api/trader/categories", "List routine categories."),
     post("routines", "/api/trader/routines", "Create a routine template.", schema::<crate::trader_tasks_api::CreateRoutineBody>),
+    get("routines", "/api/trader/routines/{id}", "One routine template with its items and schedule."),
+    patch("routines", "/api/trader/routines/{id}", "Update a routine. `items` is a full replacement list when present; existing items keep their id so past checks stay attached.", schema::<crate::trader_tasks_api::UpdateRoutineBody>),
+    delete("routines", "/api/trader/routines/{id}", "Delete a routine and its items."),
+    post("routines", "/api/trader/routines/{id}/duplicate", "Copy a routine (optionally under a new name).", schema::<crate::trader_tasks_api::DuplicateBody>),
+    post("routines", "/api/trader/routines/reorder", "Reorder the routine list.", schema::<crate::trader_tasks_api::ReorderBody>),
     post("routines", "/api/trader/categories", "Create a routine category.", schema::<crate::trader_tasks_api::CategoryBody>),
+    patch("routines", "/api/trader/categories/{id}", "Update a category.", schema::<crate::trader_tasks_api::CategoryPatch>),
+    delete("routines", "/api/trader/categories/{id}", "Delete a category (its routines stay, uncategorized)."),
     post("routines", "/api/trader/items/{id}/check", "Check/uncheck a routine item today.", schema::<crate::trader_tasks_api::CheckBody>),
     get("routines", "/api/trader/marks", "Consistency day marks. Query: from, to."),
     put("routines", "/api/trader/marks", "Mark a day full|action, or null to clear.", schema::<crate::trader_tasks_api::SetMarkBody>),
@@ -383,10 +462,19 @@ pub const CATALOG: &[Endpoint] = &[
     get("mindset", "/api/mindset/history", "Past entries."),
     get("mindset", "/api/mindset/marks", "Consistency day marks. Query: from, to."),
     put("mindset", "/api/mindset/marks", "Mark a day full|action, or null to clear.", schema::<crate::mindset_api::SetMarkBody>),
+    delete_body("mindset", "/api/mindset/entries", "Delete a saved check-in. Body names the target: date, plus template_id or phase.", schema::<crate::mindset_api::DeleteEntryBody>),
     get("mindset", "/api/mindset/templates", "List check-in templates with their prompts."),
     post("mindset", "/api/mindset/templates", "Create a check-in template.", schema::<crate::mindset_api::CreateTemplateBody>),
+    delete("mindset", "/api/mindset/templates", "Delete EVERY template (and with them their prompts). Destructive: confirm with the user first."),
+    post_empty("mindset", "/api/mindset/templates/reset", "Restore the built-in starter templates."),
+    get("mindset", "/api/mindset/templates/{id}", "One template with its prompts."),
+    patch("mindset", "/api/mindset/templates/{id}", "Update a template. `prompts` is a full replacement list when present; entries keep their id so past answers stay attached.", schema::<crate::mindset_api::UpdateTemplateBody>),
+    delete("mindset", "/api/mindset/templates/{id}", "Delete one template."),
+    post("mindset", "/api/mindset/templates/{id}/duplicate", "Copy a template (optionally under a new name).", schema::<crate::mindset_api::DuplicateBody>),
     get("mindset", "/api/mindset/categories", "List check-in categories."),
     post("mindset", "/api/mindset/categories", "Create a check-in category.", schema::<crate::mindset_api::CategoryBody>),
+    patch("mindset", "/api/mindset/categories/{id}", "Update a category.", schema::<crate::mindset_api::CategoryPatch>),
+    delete("mindset", "/api/mindset/categories/{id}", "Delete a category (its templates stay, uncategorized)."),
     get("mindset", "/api/mindset/prompts", "List prompts."),
     post("mindset", "/api/mindset/prompts", "Add a prompt.", schema::<crate::mindset_api::AddPromptBody>),
     patch("mindset", "/api/mindset/prompts/{id}", "Update a prompt.", schema::<crate::mindset_api::UpdatePromptBody>),
@@ -401,6 +489,17 @@ pub const CATALOG: &[Endpoint] = &[
     post_empty("news", "/api/feeds/refresh-all", "Poll all feeds now."),
     get("news", "/api/feed-items", "Aggregated items. Query: feed_id, search, limit, offset."),
     get("news", "/api/feed-sources", "Known source templates."),
+    get("news", "/api/feeds/quotas", "Per-feed request quota usage."),
+    get("news", "/api/feed-dashboards", "List feed dashboards (named subsets of the feeds, one of them the default)."),
+    post("news", "/api/feed-dashboards", "Create a dashboard.", schema::<crate::feeds_api::CreateDashboard>),
+    get("news", "/api/feed-dashboards/{id}", "One dashboard with its items."),
+    patch("news", "/api/feed-dashboards/{id}", "Update a dashboard (name, favorite, position, started).", schema::<otw_store::feeds::DashboardPatch>),
+    delete("news", "/api/feed-dashboards/{id}", "Delete a dashboard (its feeds stay)."),
+    post_empty("news", "/api/feed-dashboards/{id}/default", "Make it the dashboard the module opens on."),
+    post_empty("news", "/api/feed-dashboards/{id}/refresh", "Poll every feed of this dashboard now."),
+    get("news", "/api/feed-dashboards/{id}/sources", "Feeds on this dashboard."),
+    post("news", "/api/feed-dashboards/{id}/sources", "Add a feed to the dashboard.", schema::<crate::feeds_api::AddSource>),
+    delete("news", "/api/feed-dashboards/{id}/sources/{feed_id}", "Remove a feed from the dashboard."),
     // ── resources ────────────────────────────────────────────────────────────
     get("resources", "/api/resources", "List saved resources (links/notes)."),
     post("resources", "/api/resources", "Add a resource.", schema::<otw_store::resources::ResourceInput>),
@@ -414,7 +513,13 @@ pub const CATALOG: &[Endpoint] = &[
     get("prompt-store", "/api/prompts", "List saved prompts (name, body, tags)."),
     post("prompt-store", "/api/prompts", "Create a prompt.", schema::<otw_store::prompts::PromptInput>),
     get("prompt-store", "/api/prompts/{id}", "Get one prompt."),
-    patch("prompt-store", "/api/prompts/{id}", "Edit a prompt.", schema::<otw_store::prompts::PromptInput>),
+    patch("prompt-store", "/api/prompts/{id}", "Edit a prompt. Every save appends a version; nothing is overwritten in place.", schema::<otw_store::prompts::PromptInput>),
+    delete("prompt-store", "/api/prompts/{id}", "Delete a prompt and its version history."),
+    get("prompt-store", "/api/prompts/tags", "Every tag in use, for filtering."),
+    get("prompt-store", "/api/prompts/{id}/versions", "Version history of a prompt, newest first."),
+    post("prompt-store", "/api/prompts/{id}/rollback", "Restore an old version. It is appended as a new version, so the history stays append-only.", schema::<crate::prompts_api::RollbackBody>),
+    post_empty("prompt-store", "/api/prompts/{id}/duplicate", "Copy a prompt."),
+    patch("prompt-store", "/api/prompts/{id}/vote", "Set the thumbs up/down flag the quick filter reads.", schema::<crate::prompts_api::VoteBody>),
     // ── mailbox ──────────────────────────────────────────────────────────────
     // Read-only over stored mail, plus the curated newsletter store. Account
     // management, settings, attachments and unsubscribe stay out: they handle
@@ -422,10 +527,34 @@ pub const CATALOG: &[Endpoint] = &[
     get("mailbox", "/api/mailbox/senders", "List mail senders with category, status and unread counts."),
     get("mailbox", "/api/mailbox/messages", "List stored mail. Query: sender_id, account_id, category, q, unread, starred, archived, limit, offset."),
     get("mailbox", "/api/mailbox/messages/{id}", "Read one message (sanitised body + attachment list)."),
+    patch("mailbox", "/api/mailbox/messages/{id}", "Set read / starred / archived on one message. Local state only: no IMAP flag is ever written (the connection is read-only).", schema::<otw_store::mailbox::MessagePatch>),
+    delete("mailbox", "/api/mailbox/messages/{id}", "Delete a stored message locally (the mail stays on the server)."),
+    post("mailbox", "/api/mailbox/messages/read-all", "Mark every stored message read, or just one sender's with sender_id.", schema::<crate::mailbox_api::ReadAllBody>),
+    post("mailbox", "/api/mailbox/messages/{id}/remind", "Raise a reminder about this message at a given time.", schema::<crate::mailbox_api::RemindBody>),
     get("mailbox", "/api/mailbox/links", "List the curated newsletter store."),
     post("mailbox", "/api/mailbox/links", "Add a newsletter to the store.", schema::<otw_store::mailbox::StoreLinkInput>),
     patch("mailbox", "/api/mailbox/links/{id}", "Edit a store entry.", schema::<otw_store::mailbox::StoreLinkPatch>),
     delete("mailbox", "/api/mailbox/links/{id}", "Remove a store entry."),
+
+    // ── automator ────────────────────────────────────────────────────────────
+    // Authoring only. A graph written here is a PROPOSAL: it is stored as the workflow's
+    // draft, the editor shows it, and it starts running when its owner saves it. There is
+    // deliberately no way from this gateway to run a workflow, attach its access token,
+    // restore a revision, delete one, or touch a schedule.
+    get("automator", "/api/automator/workflows", "List workflows with their schedules and last run."),
+    get("automator", "/api/automator/workflows/{id}", "One workflow: its graph, its draft (an unadopted proposal), its schedules and recent runs. Read this before editing: the graph you save replaces the draft wholesale."),
+    get("automator", "/api/automator/workflows/{id}/versions", "Revision history of a workflow's graph."),
+    post("automator", "/api/automator/workflows", "Create an empty workflow, then fill it with PUT /api/automator/workflows/{id}.", schema::<crate::automator_api::CreateInput>),
+    patch("automator", "/api/automator/workflows/{id}", "Rename a workflow or edit its description, favorite, enabled flag and run limit. `mcp_token_id` is refused here: a workflow's access token is attached by its owner, in the editor.", schema::<crate::automator_api::PatchInput>),
+    put("automator", "/api/automator/workflows/{id}", "Save a graph as the workflow's DRAFT (it does not become the running graph: its owner adopts it from the editor). An invalid graph is refused with the reason, so fix and re-save. Read GET /api/automator/catalog first for the block kinds and the endpoints an `api` block may call. `repoint_schedules` and `draft` in the body are ignored here.", schema::<crate::automator_api::SaveInput>),
+    compute_post("automator", "/api/automator/workflows/{id}/test", "Test-run the workflow's draft (its graph if there is no draft) and return the whole trace, block by block. Notifications and external calls are forced off and an `api` block has no envelope, so nothing leaves the machine and nothing is written: this checks the topology, the expressions and the transforms. Refused on a workflow that already carries an access token, which its owner tests from its own page.", schema::<crate::automator_api::TestInput>),
+    get("automator", "/api/automator/catalog", "The block palette: the block kinds, the operations a `transform` and an `if` accept, and every app endpoint an `api` block may call. Read it before composing a graph."),
+    get("automator", "/api/automator/catalog/schema", "Request-body JSON Schema of ONE endpoint an `api` block would call. Query: method and path, both REQUIRED (e.g. method=POST&path=/api/reminders)."),
+    get("automator", "/api/automator/runs", "Run history. Query: workflow_id, status, limit."),
+    get("automator", "/api/automator/runs/{id}", "One run with its per-block trace: request, output, status and timing."),
+
+    // ── search ───────────────────────────────────────────────────────────────
+    get("search", "/api/search", "Title-level search across the modules that store text (documents, trades, notes, resources, prompts…). Query: q (REQUIRED), scopes (comma-separated, default all). Returns titles and ids, never bodies: read the hit through its own module endpoint. NOTE for whoever grants this: it does not check the token's other module keys, so it reads titles everywhere."),
 
     // ── community-docs ───────────────────────────────────────────────────────
     get("community-docs", "/api/community-docs", "List community docs."),
@@ -473,6 +602,34 @@ pub fn methods_for(path: &str) -> Vec<&'static str> {
     out
 }
 
+/// Endpoints whose response carries text written by someone other than the user: feed
+/// articles pulled from the open web, mail sent in by third parties, and the search index
+/// that mixes both into its hits.
+///
+/// The gateway hands a tool result straight to a model, which has no way to tell a
+/// newsletter's prose from its own operator's instructions. So these bodies are fenced and
+/// labelled on the way out (see `mcp::fence_untrusted`) instead of arriving as plain data.
+/// Matched as a path prefix, so `/api/mailbox/messages/{id}` inherits the mark from
+/// `/api/mailbox/messages`.
+///
+/// Add a path here whenever an endpoint starts returning text the user did not type.
+pub const UNTRUSTED_PATHS: &[&str] = &[
+    "/api/feeds",
+    "/api/feed-items",
+    "/api/feed-dashboards",
+    "/api/mailbox/messages",
+    "/api/mailbox/senders",
+    "/api/mailbox/links",
+    "/api/search",
+];
+
+/// Whether a concrete path serves content from outside — see [`UNTRUSTED_PATHS`].
+pub fn is_untrusted(path: &str) -> bool {
+    UNTRUSTED_PATHS
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(*p).is_some_and(|rest| rest.starts_with('/')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,12 +665,33 @@ mod tests {
         }
     }
 
-    /// The portfolio import crosses a module boundary (reads portfolios through a
-    /// watchlists-scoped token), so it stays off the allowlist.
+    /// The portfolio import crosses a module boundary: a watchlists-scoped token reaches a
+    /// portfolio's asset list through it. It is exposed anyway (the module is unusable without
+    /// its own import), so this pins the crossing as a decision rather than an accident: it is
+    /// the one watchlists entry whose effect depends on data another key normally guards.
     #[test]
-    fn watchlist_portfolio_import_is_not_exposed() {
+    fn watchlist_portfolio_import_is_a_deliberate_module_crossing() {
         let id = "22222222-2222-2222-2222-222222222222";
-        assert!(lookup("POST", &format!("/api/watchlists/{id}/import")).is_none());
+        let e = lookup("POST", &format!("/api/watchlists/{id}/import")).expect("exposed");
+        assert_eq!(e.module, "watchlists");
+    }
+
+    /// The optimizer is only usable as a chain: ask which parameters exist, price the grid,
+    /// then start it. `params` and `estimate` compute (they write nothing), `optimize` does not:
+    /// it takes every core for minutes, which is exactly the kind of thing a user should be
+    /// asked about before it happens.
+    #[test]
+    fn the_optimizer_chain_is_reachable_and_only_its_reads_are_compute() {
+        for (path, compute) in [
+            ("/api/backtest/optimize/params", true),
+            ("/api/backtest/optimize/estimate", true),
+            ("/api/backtest/optimize", false),
+        ] {
+            let e = lookup("POST", path).unwrap_or_else(|| panic!("missing {path}"));
+            assert_eq!(e.compute, compute, "{path} compute flag");
+            assert!(e.body.is_some(), "{path} must publish its body schema");
+        }
+        assert!(lookup("GET", "/api/backtest/optimize/11111111-1111-1111-1111-111111111111").is_some());
     }
 
     /// Every declared body schema must actually generate: an object schema with
@@ -696,7 +874,10 @@ mod tests {
             .iter()
             .filter_map(|v| v["properties"]["kind"]["const"].as_str())
             .collect();
-        assert_eq!(kinds, ["price", "const", "indicator", "custom_indicator"]);
+        assert_eq!(
+            kinds,
+            ["price", "const", "indicator", "custom_indicator", "metric", "position"]
+        );
     }
 
     /// The custom-indicator DAG advertises `nodes` as required — a run once failed with
@@ -710,13 +891,23 @@ mod tests {
         assert!(def["properties"]["nodes"]["items"].get("$ref").is_some());
     }
 
-    /// GET/DELETE never take a body; the constructors make this structural, this test
-    /// guards against someone bypassing them with a literal `Endpoint { .. }`.
+    /// A GET never takes a body, and a DELETE only where the handler genuinely identifies its
+    /// target by payload. The constructors make this structural; this test guards against
+    /// someone bypassing them with a literal `Endpoint { .. }`, and keeps the payload-addressed
+    /// deletes down to a list short enough to read.
     #[test]
     fn reads_and_deletes_have_no_body_schema() {
+        const DELETE_BY_BODY: &[&str] = &["/api/mindset/entries"];
         for e in CATALOG {
-            if matches!(e.method, "GET" | "DELETE") {
-                assert!(e.body.is_none(), "{} {} must not declare a body", e.method, e.path);
+            if e.method == "GET" {
+                assert!(e.body.is_none(), "GET {} must not declare a body", e.path);
+            }
+            if e.method == "DELETE" && e.body.is_some() {
+                assert!(
+                    DELETE_BY_BODY.contains(&e.path),
+                    "DELETE {} declares a body but is not a payload-addressed delete",
+                    e.path
+                );
             }
         }
     }
@@ -754,6 +945,7 @@ mod tests {
     #[test]
     fn required_query_params_are_named_in_the_description() {
         for (path, params) in [
+            ("/api/automator/catalog/schema", &["method", "path"][..]),
             ("/api/findb/facets", &["column"][..]),
             ("/api/findb/search", &["q", "kind"][..]),
             ("/api/portfolios/search", &["q", "kind"][..]),
@@ -789,5 +981,105 @@ mod tests {
             assert!(required.contains(&field), "{field} should be required");
         }
     }
-}
 
+    /// The Automator is exposed for authoring and nothing else. Composing a graph is the
+    /// hardest thing the module asks of anyone, so an agent is welcome to it; running one
+    /// is a different grant, because a workflow executes under its own `mcp_tokens`
+    /// envelope and a caller able to both write a graph and start it would inherit
+    /// whatever that envelope holds, whatever its own token says.
+    ///
+    /// This pins the line. Anything added to the reachable half must keep the property
+    /// that a graph written through this gateway cannot run until a human saves it.
+    #[test]
+    fn the_automator_is_reachable_for_authoring_only() {
+        for (method, path) in [
+            ("GET", "/api/automator/workflows"),
+            ("GET", "/api/automator/workflows/11111111-1111-1111-1111-111111111111"),
+            ("GET", "/api/automator/workflows/11111111-1111-1111-1111-111111111111/versions"),
+            ("GET", "/api/automator/catalog"),
+            ("GET", "/api/automator/catalog/schema"),
+            ("GET", "/api/automator/runs"),
+            ("GET", "/api/automator/runs/11111111-1111-1111-1111-111111111111"),
+            ("POST", "/api/automator/workflows"),
+            ("PUT", "/api/automator/workflows/11111111-1111-1111-1111-111111111111"),
+            ("PATCH", "/api/automator/workflows/11111111-1111-1111-1111-111111111111"),
+            ("POST", "/api/automator/workflows/11111111-1111-1111-1111-111111111111/test"),
+        ] {
+            let e = lookup(method, path)
+                .unwrap_or_else(|| panic!("{method} {path} should be reachable"));
+            assert_eq!(e.module, "automator", "{method} {path} is scoped to the wrong module");
+        }
+
+        // The other half. Each of these either decides what runs live, runs it, or hands
+        // out the envelope, so each is the user's own call.
+        for (method, path) in [
+            // Starts a real run, spending the whole envelope.
+            ("POST", "/api/automator/workflows/11111111-1111-1111-1111-111111111111/run"),
+            // Writes the live graph, so it is a save by another name.
+            ("POST", "/api/automator/workflows/11111111-1111-1111-1111-111111111111/rollback"),
+            // Destroys a user's automation.
+            ("DELETE", "/api/automator/workflows/11111111-1111-1111-1111-111111111111"),
+            // Runs an arbitrary block under an arbitrary workflow's envelope: the whole
+            // escalation in one call.
+            ("POST", "/api/automator/nodes/test"),
+            // A schedule is what makes a graph run unattended.
+            ("GET", "/api/automator/schedules"),
+            ("POST", "/api/automator/schedules"),
+            ("PATCH", "/api/automator/schedules/11111111-1111-1111-1111-111111111111"),
+            ("DELETE", "/api/automator/schedules/11111111-1111-1111-1111-111111111111"),
+            ("GET", "/api/automator/agenda"),
+            ("POST", "/api/automator/runs/11111111-1111-1111-1111-111111111111/cancel"),
+        ] {
+            assert!(
+                lookup(method, path).is_none(),
+                "{method} {path} must stay off the gateway",
+            );
+        }
+    }
+
+    /// A test run is `compute`, so it does not ask the user to approve it. That is only
+    /// honest because `automator_api::test_run` seals an automated one: notifications and
+    /// external calls forced off, refused outright on a workflow carrying a token. The
+    /// save is not compute, and neither is the create: they change what the user sees.
+    #[test]
+    fn only_the_automator_test_run_is_compute() {
+        let test = lookup("POST", "/api/automator/workflows/1/test").expect("test entry");
+        assert!(test.compute, "a sealed test run should not prompt");
+        for (method, path) in
+            [("PUT", "/api/automator/workflows/1"), ("POST", "/api/automator/workflows")]
+        {
+            let e = lookup(method, path).expect("entry");
+            assert!(!e.compute, "{method} {path} writes something the user would miss");
+        }
+    }
+
+    /// Every prefix in the untrusted list must name a real allowlisted path, or the mark is
+    /// documentation nobody applies. The reverse guard is the point: mail and feed bodies
+    /// reach the model verbatim, so they may never be served unfenced.
+    #[test]
+    fn untrusted_prefixes_cover_the_endpoints_that_serve_outside_text() {
+        for prefix in UNTRUSTED_PATHS {
+            assert!(
+                CATALOG.iter().any(|e| e.path.starts_with(prefix)),
+                "{prefix} marks no catalog entry"
+            );
+        }
+        for path in [
+            "/api/feed-items",
+            "/api/feed-dashboards/11111111-1111-1111-1111-111111111111",
+            "/api/mailbox/messages",
+            "/api/mailbox/messages/11111111-1111-1111-1111-111111111111",
+            "/api/mailbox/senders",
+            "/api/search",
+        ] {
+            assert!(is_untrusted(path), "{path} must be fenced");
+        }
+        // The user's own writing is not fenced: a warning printed on everything is read on
+        // nothing, and the journal holds no third-party text.
+        for path in ["/api/journal/trades", "/api/backtest/run", "/api/feedback"] {
+            assert!(!is_untrusted(path), "{path} must not be fenced");
+        }
+        // A prefix stops at a segment boundary.
+        assert!(!is_untrusted("/api/searchable"));
+    }
+}

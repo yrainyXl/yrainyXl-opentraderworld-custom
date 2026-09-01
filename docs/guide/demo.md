@@ -20,9 +20,16 @@ Broadly:
 
 | Blocked | Read-only | Full |
 |---|---|---|
-| Setup, logout, account & password, network, backup, update, data wipe, module install/detach, inbound webhooks, the MCP endpoint itself, notification channels, FinanceDatabase install, provider downloads | Data connectors, feeds, files, managers' portfolios, MCP settings & tokens, API rate, stored datasets, agent providers, memories and skills | Journal, backtest, quant, portfolios, calendar, todos, goals, editor & databases, prompts, resources, subscriptions, taxcalc, time, dashboard, search, agent chat |
+| Setup, logout, account & password, network, backup, update, data wipe, module install/detach, **the vault**, **the Automator**, inbound webhooks, the MCP endpoint itself, notification channels, FinanceDatabase install, provider downloads | Data connectors, feeds, files, managers' portfolios, MCP settings & tokens, API rate, stored datasets, agent providers, memories and skills | Journal, backtest, quant, portfolios, calendar, todos, goals, editor & databases, prompts, resources, subscriptions, taxcalc, time, dashboard, search, agent chat |
 
 So you can log a trade, run a backtest and talk to the assistant; you cannot change the network mode, mint a token, take the database, or make the box fetch from a metered provider on your behalf.
+
+Two of those deserve a word, since the module is visible but does nothing:
+
+- **The vault** is closed outright. It is the one store whose whole purpose is holding credentials, and this database is shared and public.
+- **The Automator** is closed by the default-deny rule rather than by a line of its own: a workflow reaches whatever its token grants and can call any URL, which is exactly what a public sandbox must not offer. Opening the module shows the UI; every request behind it answers `demo_disabled`.
+
+Chat messages are also capped at 2000 characters.
 
 ## Per-visitor quotas
 

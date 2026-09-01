@@ -38,6 +38,9 @@ static CAP: Capability = Capability {
     adjusted: true,
     // Tencent fqkline serves ~800 daily bars per request.
     max_bars_per_req: 800,
+    // Keyless sources; aggressive polling may get an IP throttled, so keep a
+    // conservative 1s minimum between requests (matches the rate_limit note).
+    min_interval_ms: 1_000,
     searchable: true,
 };
 

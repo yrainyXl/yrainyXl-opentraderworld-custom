@@ -7,9 +7,8 @@
 //! Stateless like the backtest module: dataset ids in, metrics out. Bars come from the
 //! histdata catalog (the same data the visualization and backtest modules consume), so the
 //! Historical Data module must be installed and have downloaded datasets. Multi-asset
-//! endpoints align series on their shared timestamps before computing.
-
-use std::collections::BTreeMap;
+//! endpoints align series through [`crate::align`] (by period, not by raw timestamp), drop a
+//! mixed-calendar basket to weekly, and annualize on the measured clock.
 
 use axum::{routing::post, Json, Router};
 use serde::Deserialize;
@@ -19,6 +18,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::quant;
+use crate::{align, timeframe};
 use crate::{ApiError, AppState};
 use otw_store::histdata as hd;
 
@@ -256,8 +256,8 @@ async fn asset_signals(
     })))
 }
 
-#[derive(Deserialize)]
-struct SeasonalityBody {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct SeasonalityBody {
     dataset_id: Uuid,
     #[serde(default)]
     from: Option<String>,
@@ -317,6 +317,12 @@ pub(crate) struct PortfolioBody {
     /// Annual risk-free rate for Sharpe (e.g. 0.0).
     #[serde(default)]
     risk_free: f64,
+    /// Granularity the statistics are measured at: `"auto"` (default) drops a basket that
+    /// mixes a 24/7 market with an exchange-hours one to weekly, `"stored"` forces the
+    /// datasets' own timeframe, or name one explicitly (`"1w"`, `"1M"`). Coarser than the
+    /// stored timeframe only: nothing here can invent finer bars.
+    #[serde(default)]
+    measure: Option<String>,
 }
 
 fn default_samples() -> usize {
@@ -334,48 +340,96 @@ async fn portfolio(
         return Err(ApiError::bad_request("at most 20 datasets"));
     }
 
-    // Load each asset's timestamp→close map and its timeframe.
+    // Load each asset's timestamps + closes, in ascending time order.
     let mut labels = Vec::new();
-    let mut maps: Vec<BTreeMap<String, f64>> = Vec::new();
+    let mut providers = Vec::new();
     let mut timeframes = Vec::new();
+    let mut stamps: Vec<Vec<String>> = Vec::new();
+    let mut closes: Vec<Vec<f64>> = Vec::new();
     for id in &body.dataset_ids {
-        let (ds, ts, closes) = load_closes(&state, *id, None, None).await?;
-        let mut m = BTreeMap::new();
-        for (t, c) in ts.into_iter().zip(closes) {
-            m.insert(t, c);
-        }
+        let (ds, ts, c) = load_closes(&state, *id, None, None).await?;
         labels.push(ds.ticker.clone());
+        providers.push(ds.provider.clone());
         timeframes.push(ds.timeframe.clone());
-        maps.push(m);
+        stamps.push(ts);
+        closes.push(c);
     }
 
-    // Align on the intersection of timestamps (sorted, since BTreeMap keys are ordered).
-    let common: Vec<String> = {
-        let mut it = maps.iter();
-        let first = it.next().unwrap();
-        let mut keys: Vec<String> = first.keys().cloned().collect();
-        for m in it {
-            keys.retain(|k| m.contains_key(k));
-        }
-        keys
-    };
-    if common.len() < 3 {
+    // A shared timeframe is a precondition, not an assumption: mixing daily and hourly bars
+    // in one covariance matrix has no meaning, and the annualization factor would silently be
+    // the first dataset's.
+    if timeframes.iter().any(|t| t != &timeframes[0]) {
+        return Err(ApiError::bad_request(&format!(
+            "datasets must share one timeframe, got {}",
+            timeframes.join(", ")
+        )));
+    }
+    let stored = timeframe::Timeframe::parse(&timeframes[0])
+        .map_err(|e| ApiError::bad_request(&format!("unknown timeframe: {e}")))?;
+
+    let series: Vec<align::Series<'_>> = labels
+        .iter()
+        .zip(&stamps)
+        .map(|(l, ts)| align::Series { label: l.as_str(), ts })
+        .collect();
+
+    // Intraday bars cannot be aligned across stamping conventions (a 09:30 session bar and an
+    // 08:00 epoch-grid one are 90 minutes apart), so a mixed-provider intraday request is
+    // refused rather than approximated.
+    if stored.is_intraday() && providers.iter().any(|p| p != &providers[0]) {
         return Err(ApiError::bad_request(
-            "datasets share too few common timestamps (need aligned periods/timeframe)",
+            "intraday bars from different providers cannot be aligned (their sessions are \
+             anchored differently): use daily datasets, or one provider for the whole basket",
         ));
     }
 
-    // Aligned close series → per-asset return series.
-    let rets: Vec<Vec<f64>> = maps
+    // What granularity to measure at.
+    let (grain, resample) = match body.measure.as_deref().map(str::trim).unwrap_or("auto") {
+        "auto" | "" => align::measure_grain(stored, &series),
+        "stored" => (stored, None),
+        other => {
+            let tf = timeframe::Timeframe::parse(other)
+                .map_err(|e| ApiError::bad_request(&format!("invalid `measure`: {e}")))?;
+            (tf, None)
+        }
+    };
+    if let (Some(g), Some(st)) = (grain.secs(), stored.secs()) {
+        if g < st {
+            return Err(ApiError::bad_request(&format!(
+                "cannot measure at {} from {} bars: a coarser timeframe only",
+                grain.label(),
+                stored.label()
+            )));
+        }
+    }
+
+    let merged = align::merge(&series, align::Grain::At(grain), align::Join::Intersection);
+    if merged.rows() < 3 {
+        return Err(ApiError::bad_request(&format!(
+            "datasets share only {} period(s) at {}: check their date ranges overlap",
+            merged.rows(),
+            grain.label()
+        )));
+    }
+
+    // Aligned close series → per-asset return series. An intersection join fills every row
+    // for every asset, so the series come out the same length; the check keeps that a fact
+    // rather than an assumption, since a ragged matrix would quietly skew the covariance.
+    let rets: Vec<Vec<f64>> = closes
         .iter()
-        .map(|m| {
-            let closes: Vec<f64> = common.iter().map(|k| m[k]).collect();
-            quant::returns(&closes)
+        .zip(&merged.maps)
+        .map(|(c, m)| {
+            let aligned: Vec<f64> = m.iter().filter_map(|b| b.map(|bi| c[bi])).collect();
+            quant::returns(&aligned)
         })
         .collect();
+    if rets.iter().any(|r| r.len() != rets[0].len()) {
+        return Err(ApiError::internal("aligned series came back ragged"));
+    }
 
-    // Annualization uses the (assumed shared) timeframe of the first asset.
-    let ppy = quant::periods_per_year(&timeframes[0]);
+    // Annualization is measured on the clock, never assumed from the timeframe: the same
+    // daily timeframe is 252 periods a year on an exchange and 365 on a 24/7 market.
+    let ppy = align::observed_ppy(&merged.clock, grain.periods_per_year());
     let samples = body.samples.clamp(500, 50_000);
 
     let corr = quant::correlation_matrix(&labels, &rets);
@@ -385,8 +439,24 @@ async fn portfolio(
     Ok(Json(json!({
         "labels": labels,
         "timeframes": timeframes,
-        "periods": common.len(),
+        "periods": merged.rows(),
         "periods_per_year": ppy,
+        "measured_at": grain.label(),
+        "nominal_periods_per_year": grain.periods_per_year(),
+        "resampled": resample.map(|r| json!({
+            "from": r.from.label(),
+            "to": r.to.label(),
+            "reason": r.reason,
+        })),
+        "alignment": json!({
+            "from": merged.clock.first(),
+            "to": merged.clock.last(),
+            "assets": merged.labels.iter().zip(&stamps).zip(&merged.collapsed).map(|((l, ts), collapsed)| json!({
+                "ticker": l,
+                "bars": ts.len(),
+                "collapsed": collapsed,
+            })).collect::<Vec<_>>(),
+        }),
         "correlation": corr,
         "frontier": frontier,
         "risk_parity": parity,

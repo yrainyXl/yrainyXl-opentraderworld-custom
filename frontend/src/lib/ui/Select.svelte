@@ -9,7 +9,8 @@
   //
   //   <Select label="Currency" options={[{value:'EUR',label:'Euro'}]} bind:value={ccy} />
   // props: value (bindable), options ([{value,label}] or string[]),
-  //        label, hint, error, id, required, disabled, placeholder, onpick
+  //        label, hint, error, id, required, disabled, placeholder, onpick,
+  //        searchable (null = let the Dropdown decide from the option count)
   let {
     value = $bindable(''),
     options = [],
@@ -20,6 +21,8 @@
     required = false,
     disabled = false,
     placeholder = '',
+    searchable = null,
+    searchPlaceholder = '',
     onpick = null
   } = $props();
 
@@ -36,6 +39,8 @@
     options={items}
     {placeholder}
     {disabled}
+    {searchable}
+    {searchPlaceholder}
     {onpick}
     ariaLabel={label || placeholder || undefined}
   />

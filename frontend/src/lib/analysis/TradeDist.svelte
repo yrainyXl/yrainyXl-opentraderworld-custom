@@ -5,7 +5,7 @@
   import { onMount, onDestroy } from 'svelte';
   import * as echarts from 'echarts';
   import { t } from '$lib/i18n';
-  import { returnBuckets } from './quicktest.js';
+  import { returnBuckets } from './trades.js';
 
   let { trades = [], s = {} } = $props();
 
@@ -98,10 +98,10 @@
       },
       series: [
         {
-          ...bar($t('histviz.quick.losers'), d.buckets.map((b) => b.losers || null), p.red),
+          ...bar($t('analysis.losers'), d.buckets.map((b) => b.losers || null), p.red),
           markLine: { silent: true, symbol: 'none', data: marks }
         },
-        bar($t('histviz.quick.winners'), d.buckets.map((b) => b.winners || null), p.green)
+        bar($t('analysis.winners'), d.buckets.map((b) => b.winners || null), p.green)
       ]
     };
   }
@@ -127,7 +127,7 @@
           label: {
             show: true,
             position: 'center',
-            formatter: () => `{n|${total}}\n{l|${$t('histviz.quick.totalTrades')}}`,
+            formatter: () => `{n|${total}}\n{l|${$t('analysis.totalTrades')}}`,
             rich: {
               n: { color: p.text, fontFamily: p.mono, fontSize: 20, fontWeight: 500 },
               l: { color: p.dim, fontSize: 10, padding: [4, 0, 0, 0] }
@@ -135,9 +135,9 @@
           },
           labelLine: { show: false },
           data: [
-            { value: st.wins ?? 0, name: $t('histviz.quick.winners'), itemStyle: { color: p.green } },
-            { value: st.losses ?? 0, name: $t('histviz.quick.losers'), itemStyle: { color: p.red } },
-            { value: st.breakevens ?? 0, name: $t('histviz.quick.breakevens'), itemStyle: { color: p.amber } }
+            { value: st.wins ?? 0, name: $t('analysis.winners'), itemStyle: { color: p.green } },
+            { value: st.losses ?? 0, name: $t('analysis.losers'), itemStyle: { color: p.red } },
+            { value: st.breakevens ?? 0, name: $t('analysis.breakevens'), itemStyle: { color: p.amber } }
           ].filter((x) => x.value > 0)
         }
       ]
@@ -154,26 +154,26 @@
   });
 
   const legend = $derived([
-    { label: $t('histviz.quick.winners'), color: 'var(--green)', n: s.wins ?? 0 },
-    { label: $t('histviz.quick.losers'), color: 'var(--red)', n: s.losses ?? 0 },
-    { label: $t('histviz.quick.breakevens'), color: 'var(--amber)', n: s.breakevens ?? 0 }
+    { label: $t('analysis.winners'), color: 'var(--green)', n: s.wins ?? 0 },
+    { label: $t('analysis.losers'), color: 'var(--red)', n: s.losses ?? 0 },
+    { label: $t('analysis.breakevens'), color: 'var(--amber)', n: s.breakevens ?? 0 }
   ]);
 </script>
 
 <div class="dist">
   <section>
-    <h4>{$t('histviz.quick.returnsDist')}</h4>
+    <h4>{$t('analysis.returnsDist')}</h4>
     <div class="ec" bind:this={histEl}></div>
     <div class="foot">
-      <span><i class="sq" style:background="var(--red)"></i>{$t('histviz.quick.losers')}</span>
-      <span><i class="sq" style:background="var(--green)"></i>{$t('histviz.quick.winners')}</span>
-      <span class="avg red">{$t('histviz.quick.avgLoss')} <b>{dist.avgLossPct == null ? '—' : pct(dist.avgLossPct)}</b></span>
-      <span class="avg green">{$t('histviz.quick.avgWin')} <b>{dist.avgWinPct == null ? '—' : pct(dist.avgWinPct)}</b></span>
+      <span><i class="sq" style:background="var(--red)"></i>{$t('analysis.losers')}</span>
+      <span><i class="sq" style:background="var(--green)"></i>{$t('analysis.winners')}</span>
+      <span class="avg red">{$t('analysis.avgLoss')} <b>{dist.avgLossPct == null ? '—' : pct(dist.avgLossPct)}</b></span>
+      <span class="avg green">{$t('analysis.avgWin')} <b>{dist.avgWinPct == null ? '—' : pct(dist.avgWinPct)}</b></span>
     </div>
   </section>
 
   <section>
-    <h4>{$t('histviz.quick.tradesDist')}</h4>
+    <h4>{$t('analysis.tradesDist')}</h4>
     <div class="donut-row">
       <div class="ec donut" bind:this={donutEl}></div>
       <ul class="keys">
