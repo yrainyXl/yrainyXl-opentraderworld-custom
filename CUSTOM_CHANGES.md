@@ -90,7 +90,24 @@
 - **并发安全**：`ensure_case` 事务内 `ON CONFLICT DO NOTHING` + 竞争失败整体 rollback（document 不落库）→ 1 case + 1 document + 0 orphan（10 并发实测）。
 - **Upstream 潜在冲突点**：低（全部为新增文件/新增表；仅 `documents.rs`/`portfolios.rs` 小改动，冲突面小）。
 - **如何验证**：cargo check + tests（otw-store 35、otw-core 445）+ frontend build + 冒烟 A–J（见设计文档 §N）。
-- **如何回滚**：恢复 `otw-core:rollback-pre-phase1` / `otw-frontend:rollback-pre-phase1` image；DB 侧 `DELETE FROM decision_records; DELETE FROM investment_cases;` + `DELETE FROM _sqlx_migrations WHERE version = 9000000102`（旧 binary 内嵌无 9000000102，多出的行会 VersionMissing，必须删 row；两表数据可先备份）。
+- **镜像**（实查 2026-09-01）：Phase 1 前（v0.0.9 升级产物）core = `a5df3007…` → 已打 `otw-core:rollback-pre-phase1`；Phase 1 初版 build = `51e44f89…`（已被替换）；**最终 running/latest = `7be5ee04…`**（含 price_at RFC3339 修复）；frontend running/latest = `e909c50d…`，rollback = `23fcd0d6…`（`otw-frontend:rollback-pre-phase1`）。已验证 running == latest 且 running != rollback。
+- **如何回滚**（正确流程，schema 与 migration metadata 必须一致）：
+```text
+1. docker compose stop core
+2. 备份 Phase 1 两表数据（pg_dump 或 CREATE TABLE ... AS SELECT）
+3. 一个事务内：
+   BEGIN;
+   DROP TABLE decision_records;      -- 先删子表（FK → investment_cases）
+   DROP TABLE investment_cases;      -- 引用 documents 的表被删除，documents 不受影响
+   DELETE FROM _sqlx_migrations WHERE version = 9000000102;
+   COMMIT;
+   -- 不能只 DELETE rows 而保留表：否则 SQLx 认为 9000000102 未执行，
+   -- 重新部署 Phase 1 时 CREATE TABLE 会与遗留表冲突。
+   -- 也不要把 9000000102 的 IF NOT EXISTS 实现细节当作回滚策略。
+   -- 注意：Phase 1 创建的研究 documents 会保留为普通页面（无害，可手动清理）。
+4. 恢复 otw-core:rollback-pre-phase1 + otw-frontend:rollback-pre-phase1
+5. 启动 → /api/health 验证
+```
 
 ### C-006 v0.0.9 升级（2026-09-01）
 
