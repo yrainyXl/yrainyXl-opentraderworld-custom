@@ -41,19 +41,34 @@ a shortcut is easier.
 
 ## Rust development rules
 
+Rust checks go through `scripts/cargo-check.sh` — it pins the toolchain
+(rust:1.98.0-slim, in sync with core/Dockerfile and core/rust-toolchain.toml)
+and reuses the persistent cache volumes `otw-check-cargo` / `otw-check-target`,
+so every session gets a warm cache instead of a cold compile.
+
 Do NOT repeatedly perform Docker release builds while developing.
 
-Development sequence:
+Check scope by change type:
+
+- Markdown/docs only → no Rust check
+- frontend only → frontend check only (no Rust check)
+- cn-market / Python only → Python check only
+- migration rename or content-only change → no standalone cargo check;
+  the final Core build verifies the embedded migrations
+- Rust source changed → scripts/cargo-check.sh, then targeted tests
+- production deployment → one `docker compose build core` at the end
+
+Development sequence for Rust changes:
 
 1. inspect source and git diff
 2. modify code
-3. cargo check
+3. scripts/cargo-check.sh
 4. targeted tests
-5. frontend checks if applicable
-6. only after implementation is stable:
-   perform one Docker release build
+5. only when deploying: one Docker release build
 
 Docker builds must preserve Cargo registry/git/target BuildKit caches.
+The Docker core builder toolchain must stay in sync with
+scripts/cargo-check.sh and core/rust-toolchain.toml.
 
 ## SQLx migrations
 

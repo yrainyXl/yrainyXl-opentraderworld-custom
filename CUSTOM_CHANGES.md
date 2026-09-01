@@ -121,7 +121,7 @@
 
 ## 4. 构建 / 部署要点
 
-- 开发期：`cargo check -p otw-core` → 必要 `cargo test -p otw-core` → 全部通过后才做**一次** Docker release build（禁止每改几行就 release build）。
+- 开发期 Rust 检查统一走 `scripts/cargo-check.sh`（toolchain 固定 `rust:1.98.0-slim`，与 `core/Dockerfile`、`core/rust-toolchain.toml` 一致；复用持久缓存卷 `otw-check-cargo` / `otw-check-target`）→ 必要 `cargo test -p otw-core` → 全部通过后才做**一次** Docker release build（禁止每改几行就 release build）。
 - 部署默认**不做破坏性操作**：禁止 `docker compose down -v`、删 PostgreSQL volume、清用户数据、重置 connectors/settings；只重建必要服务并保留数据卷。
 - `cn-market` 只监听 Docker 内部网络（无端口映射），对宿主机不可见。
 

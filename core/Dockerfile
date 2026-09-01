@@ -1,5 +1,7 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:1-slim AS builder
+# Toolchain is PINNED (rust:1.98.0-slim) — must stay in sync with
+# scripts/cargo-check.sh and core/rust-toolchain.toml (channel 1.98.0).
+FROM rust:1.98.0-slim AS builder
 
 # CN-friendly mirrors: static.rust-lang.org / crates.io are slow or unreachable from
 # some networks — route rustup and cargo through rsproxy.cn.

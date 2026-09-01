@@ -1,4 +1,6 @@
 # Pin a known-good toolchain so local builds match CI and the Docker image.
 # Several dependencies (sqlx, argon2 trees) require a recent Rust (edition 2024).
+# Channel is pinned to an exact version — keep in sync with core/Dockerfile
+# (rust:1.98.0-slim) and scripts/cargo-check.sh.
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
