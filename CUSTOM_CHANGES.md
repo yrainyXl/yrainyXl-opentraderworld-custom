@@ -161,3 +161,49 @@
   - 禁止 `git merge upstream/master` / cherry-pick 官方 release root；
   - 升级走本地 linearized `vendor/upstream`（synthetic commit：tree = 新官方 release，parent = 上一版 vendor snapshot），再 merge 进 `custom/main`。
 - **仓库外备份**：`/opt/apps/backups/otw-tree-pre-git-20260901-124803.tgz`（git 恢复前的工作树备份）。
+
+---
+
+## 8. v0.0.9 升级与正确回滚（2026-09-01）
+
+### 8.1 SQLx 通用规则（重要）
+
+SQLx 0.9 启动校验（`sqlx-core` migrator.rs `validate_applied_migrations`）：**遍历 `_sqlx_migrations` 中全部已应用行，凡 version 不在当前 binary 内嵌 migration 集合中，即返回 `MigrateError::VersionMissing(version)` 并拒绝启动**（除非显式 `ignore_missing`，本项目不启用）。
+
+推论：
+
+- 「旧 binary + 已应用新 migration 的 DB」**不能直接启动**（VersionMissing）。
+- 「新 binary + 旧 DB」会按序应用缺失 migration，是正常升级路径。
+- 因此任何升级的回滚必须**同时**回滚 binary 与 `_sqlx_migrations` 中本次新增的 rows（schema object 本身可保留，见 8.2）。
+
+### 8.2 v0.0.9 升级回滚（正确流程）
+
+适用场景：新 Core 已启动并自动应用了 0092–0097，需要回退到 v0.0.8（含 9000000100/101 的 cutover binary）。
+
+```text
+1. docker compose stop core
+2. 事务中删除本次新增的 migration rows：
+   BEGIN;
+   DELETE FROM _sqlx_migrations WHERE version IN (92,93,94,95,96,97);
+   COMMIT;
+   -- 校验：SELECT version FROM _sqlx_migrations WHERE version BETWEEN 92 AND 97; → 0 rows
+3. 不需要删除 92~97 新增的 tables/columns/indexes：
+   0092–0097 均为 additive + IF NOT EXISTS，
+   schema object 保留无害（旧 binary 不引用它们）。
+4. 恢复升级前 rollback Core image（opentraderworld/otw-core:rollback-pre-v0.0.9）。
+5. 启动旧 Core（此时 DB 中已无 92~97 rows，不会 VersionMissing）。
+6. /api/health 验证。
+7. 查询 _sqlx_migrations：92~97 = 0 rows；9000000100/101 保持存在。
+```
+
+重新升级到 v0.0.9 时，新 Core 会重新执行 0092–0097；`IF NOT EXISTS` 保证已有 schema object 不冲突，并重新写入 migration metadata。
+
+### 8.3 升级路径（vendor/upstream 线性化）
+
+- 官方 release 是独立 root snapshot（禁止直接 merge/cherry-pick），升级走 `vendor/upstream`：
+  - `vendor/upstream` = v0.0.8 → synthetic v0.0.9（tree 与官方 v0.0.9 一致，parent = v0.0.8）。
+  - `custom/main` merge `vendor/upstream`（三方 merge base = v0.0.8）。
+- v0.0.9 升级已知冲突/修复点（dry-run 验证）：
+  - 冲突仅 `frontend/src/lib/i18n/en.json`、`zh.json`（保留 upstream Yahoo 新文案 + custom China 文案）。
+  - `histdata/china.rs` 需补 `min_interval_ms: 1_000`（upstream 给 `Capability` 新增字段）。
+  - `CHANGELOG.md` 需把 custom 条目移回独立 `[Unreleased]`（自动合并会并入 `[0.0.9]`）。
