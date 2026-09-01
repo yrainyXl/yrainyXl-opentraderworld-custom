@@ -448,7 +448,7 @@ pub async fn delete_operation(pool: &PgPool, id: Uuid) -> anyhow::Result<()> {
 /// Operations are entered in the asset's `currency`; each one converts to USD at **its own**
 /// date, so a historical buy keeps the rate that applied then instead of being re-valued at
 /// today's. A missing rate falls back to the raw amount (same as elsewhere in the module).
-async fn position_usd(
+pub(crate) async fn position_usd(
     pool: &PgPool,
     ops: &[Operation],
     currency: &str,
@@ -488,7 +488,7 @@ async fn position_usd(
 }
 
 /// Build the computed view for one asset, converting USD figures to `currency` on `date`.
-async fn asset_view(
+pub(crate) async fn asset_view(
     pool: &PgPool,
     asset: Asset,
     ops: &[Operation],

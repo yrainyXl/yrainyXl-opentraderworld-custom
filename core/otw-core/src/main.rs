@@ -42,6 +42,7 @@ mod histdata_cipher;
 mod histdata_job;
 mod import;
 mod internal_call;
+mod investment_cases_api;
 mod journal_api;
 mod journal_import;
 mod journal_import_api;
@@ -404,7 +405,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(agent_api::routes())
         .merge(webhooks_api::routes())
         .merge(mailbox_api::routes())
-        .merge(automator_api::routes());
+        .merge(automator_api::routes())
+        .merge(investment_cases_api::routes());
 
     // MCP serves tool calls by running the same handlers in-process, minus the
     // session middleware (it authenticates with bearer tokens and injects the admin
@@ -626,7 +628,7 @@ impl ApiError {
     pub fn bad_request(m: &str) -> Self {
         Self { status: StatusCode::BAD_REQUEST, message: m.into() }
     }
-    fn unauthorized(m: &str) -> Self {
+    pub fn unauthorized(m: &str) -> Self {
         Self { status: StatusCode::UNAUTHORIZED, message: m.into() }
     }
     pub fn conflict(m: &str) -> Self {

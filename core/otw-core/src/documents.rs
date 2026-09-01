@@ -1,9 +1,15 @@
 //! HTTP API for the editor module's document tree (folders + pages). Single-user.
+//!
+//! Research documents (linked from `investment_cases.document_id`) get extra
+//! guards here: ownership of the linked case must match the authenticated user
+//! (GET/PATCH/DELETE), and deleting a referenced document returns HTTP 409 —
+//! both pre-checked at the application layer AND mapped from the FK violation
+//! (23503) as the final race protection, never a raw 500.
 
 use axum::{
     extract::{Path, State},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -11,6 +17,33 @@ use sqlx::types::JsonValue;
 use uuid::Uuid;
 
 use crate::{ApiError, AppState};
+
+/// Ownership guard for research documents: when this document is referenced by
+/// an investment case, the case's user must be the authenticated user.
+/// Returns `Ok(())` for non-research documents (single-user model: everything
+/// else is shared). Foreign research documents answer 404 (no existence leak).
+async fn research_guard(
+    state: &AppState,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
+    let Some(case) = otw_store::investment_cases::find_case_by_document_id(&state.pool, id).await?
+    else {
+        return Ok(());
+    };
+    if case.user_id != user_id {
+        return Err(ApiError::not_found("document not found"));
+    }
+    Ok(())
+}
+
+fn is_fk_violation(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        c.downcast_ref::<sqlx::Error>()
+            .and_then(|e| e.as_database_error())
+            .is_some_and(|db| db.code().as_deref() == Some("23503"))
+    })
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -59,8 +92,10 @@ async fn create(
 /// GET /api/documents/{id} — one document with content.
 async fn get_one(
     State(state): State<AppState>,
+    Extension(user): Extension<otw_store::User>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    research_guard(&state, user.id, id).await?;
     let doc = otw_store::documents::get(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("document not found"))?;
@@ -77,9 +112,11 @@ pub(crate) struct UpdateBody {
 /// PATCH /api/documents/{id} — update title, content and/or layout (autosave).
 async fn update(
     State(state): State<AppState>,
+    Extension(user): Extension<otw_store::User>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
+    research_guard(&state, user.id, id).await?;
     if let Some(l) = &body.layout {
         if !matches!(l.as_str(), "normal" | "wide") {
             return Err(ApiError::bad_request("layout must be 'normal' or 'wide'"));
@@ -148,9 +185,30 @@ async fn set_flag(
 /// DELETE /api/documents/{id} — delete (cascades to children).
 async fn delete(
     State(state): State<AppState>,
+    Extension(user): Extension<otw_store::User>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let ok = otw_store::documents::delete(&state.pool, id).await?;
+    research_guard(&state, user.id, id).await?;
+    // Research documents referenced by an investment case cannot be deleted:
+    // pre-check for a clear 409 before touching the DB.
+    if let Some(_case) = otw_store::investment_cases::find_case_by_document_id(&state.pool, id)
+        .await?
+    {
+        return Err(ApiError::conflict(
+            "document is referenced by an investment case; delete the case first",
+        ));
+    }
+    // FK violation (23503) as the final race protection — map to 409, never 500.
+    let result = otw_store::documents::delete(&state.pool, id).await;
+    let ok = match result {
+        Ok(ok) => ok,
+        Err(err) if is_fk_violation(&err) => {
+            return Err(ApiError::conflict(
+                "document is referenced by another record; delete that record first",
+            ))
+        }
+        Err(err) => return Err(err.into()),
+    };
     if !ok {
         return Err(ApiError::not_found("document not found"));
     }

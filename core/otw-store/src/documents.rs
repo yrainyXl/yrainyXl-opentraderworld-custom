@@ -6,7 +6,7 @@
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::types::JsonValue;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -93,8 +93,23 @@ pub async fn get(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Document>> {
 }
 
 /// Create a folder or page. Returns the new document's metadata.
+///
+/// Thin wrapper over [`create_with`] that checks out a pooled connection.
 pub async fn create(
     pool: &PgPool,
+    parent_id: Option<Uuid>,
+    kind: &str,
+    title: &str,
+) -> anyhow::Result<DocumentMeta> {
+    let mut conn = pool.acquire().await?;
+    create_with(&mut conn, parent_id, kind, title).await
+}
+
+/// Transaction-compatible document creation on an existing connection (also used
+/// inside caller transactions via `&mut *tx`). Keeps the MAX(position) + INSERT
+/// initialization in ONE place so callers never re-implement document setup.
+pub async fn create_with(
+    conn: &mut PgConnection,
     parent_id: Option<Uuid>,
     kind: &str,
     title: &str,
@@ -105,7 +120,7 @@ pub async fn create(
         "SELECT MAX(position) FROM documents WHERE parent_id IS NOT DISTINCT FROM $1",
     )
     .bind(parent_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     let position = next_pos.0.unwrap_or(0.0) + 1.0;
 
@@ -117,7 +132,7 @@ pub async fn create(
     .bind(kind)
     .bind(title)
     .bind(position)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .context("inserting document")?;
 

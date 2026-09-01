@@ -26,6 +26,7 @@ pub mod findb;
 pub mod goals;
 pub mod histdata;
 pub mod imports;
+pub mod investment_cases;
 pub mod journal;
 pub mod journal_analytics;
 pub mod journal_fx;
