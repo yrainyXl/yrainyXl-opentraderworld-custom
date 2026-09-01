@@ -70,6 +70,18 @@ Docker builds must preserve Cargo registry/git/target BuildKit caches.
 The Docker core builder toolchain must stay in sync with
 scripts/cargo-check.sh and core/rust-toolchain.toml.
 
+## Frontend verification
+
+- Small frontend changes (CSS / i18n / UI text): run the frontend check/build,
+  then rely on the existing browser manual smoke — do NOT stand up new browser
+  test infrastructure for them.
+- Playwright / browser automation is only used when:
+  - the project already has Playwright test infrastructure, or
+  - the required images/dependencies already exist, or
+  - the task explicitly asks for E2E tests.
+- Never download large Playwright Docker images (e.g. mcr.microsoft.com/playwright)
+  for ordinary CSS / i18n / UI fixes.
+
 ## SQLx migrations
 
 Before creating a migration:
