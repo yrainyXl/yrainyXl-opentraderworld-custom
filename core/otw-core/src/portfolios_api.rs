@@ -197,7 +197,7 @@ async fn search(
 ) -> Result<Json<Value>, ApiError> {
     let hits = match q.kind.as_str() {
         "crypto" => prices::search_crypto(&state.pool, &q.q).await?,
-        "stock" | "etf" => prices::search_stock(&q.q).await?,
+        "stock" | "etf" => prices::search_stock(&q.q, &q.kind).await?,
         _ => return Err(ApiError::bad_request("kind must be 'crypto' or 'stock'")),
     };
     Ok(Json(json!({ "results": hits })))
@@ -223,7 +223,7 @@ async fn add_asset(
     Path(id): Path<Uuid>,
     Json(b): Json<AddAssetBody>,
 ) -> Result<Json<Value>, ApiError> {
-    if !matches!(b.provider.as_str(), "coingecko" | "yahoo") {
+    if !matches!(b.provider.as_str(), "coingecko" | "yahoo" | "china") {
         return Err(ApiError::bad_request("unknown provider"));
     }
     if b.provider_id.trim().is_empty() {
@@ -233,8 +233,13 @@ async fn add_asset(
         .await?
         .ok_or_else(|| ApiError::not_found("portfolio not found"))?;
     // The currency the asset's operations are entered in. Defaults to the portfolio's display
-    // currency, which is what the user is looking at when they add it.
-    let currency = b.currency.as_deref().map(str::trim).unwrap_or(&pf.currency);
+    // currency — except China Market (A-share) assets, whose operations are always entered in
+    // CNY no matter what currency the portfolio displays in.
+    let currency = b
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_else(|| if b.provider == "china" { "CNY" } else { &pf.currency });
     if !CURRENCIES.contains(&currency) {
         return Err(ApiError::bad_request("unknown currency"));
     }
@@ -311,7 +316,7 @@ async fn patch_asset(
     Json(b): Json<PatchAssetBody>,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(Some(p)) = &b.spot_provider {
-        if !matches!(p.as_str(), "coingecko" | "yahoo" | "binance" | "kraken" | "coinbase") {
+        if !matches!(p.as_str(), "coingecko" | "yahoo" | "china" | "binance" | "kraken" | "coinbase") {
             return Err(ApiError::bad_request("unknown spot_provider"));
         }
     }

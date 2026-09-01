@@ -57,7 +57,9 @@
   function startEdit(a) {
     const opts = sourcesFor(a.asset_class);
     edits[a.id] = {
-      source: a.spot_provider ?? opts[0].id,
+      // Default to the asset's own provider when it's a valid option (e.g. a China Market
+      // asset stays on `china` instead of jumping to the list's first entry), else the first.
+      source: a.spot_provider ?? (opts.some((o) => o.id === a.provider) ? a.provider : opts[0].id),
       symbol: a.spot_symbol || a.symbol || '',
       saving: false
     };

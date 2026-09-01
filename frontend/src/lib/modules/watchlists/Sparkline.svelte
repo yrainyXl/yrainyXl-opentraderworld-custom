@@ -1,15 +1,16 @@
 <script>
   // Inline SVG sparkline for a watchlist row: normalized polyline + soft fill, green when the
   // series ends up vs its start, red when down. Trend only — no axes, no hover. Falls back to
-  // a dashed baseline when there aren't at least two points.
+  // a dashed baseline when there aren't at least two points. `china` flips the palette to the
+  // domestic convention (涨红跌绿), same as the change cells.
   import { t } from '$lib/i18n';
 
-  let { values = [], width = 120, height = 30 } = $props();
+  let { values = [], width = 120, height = 30, china = false } = $props();
 
   const PAD = 2;
 
   let up = $derived(values.length >= 2 ? values[values.length - 1] >= values[0] : true);
-  let color = $derived(up ? 'var(--green)' : 'var(--red)');
+  let color = $derived(up !== china ? 'var(--green)' : 'var(--red)');
 
   let points = $derived.by(() => {
     if (values.length < 2) return [];

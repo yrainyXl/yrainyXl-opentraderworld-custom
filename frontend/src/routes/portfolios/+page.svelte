@@ -149,6 +149,7 @@
                button would have instead of silencing the linter. -->
           <div
             class="card"
+            class:cn={p.currency === 'CNY'}
             role="button"
             tabindex="0"
             onclick={() => (selected = p.id)}
@@ -354,6 +355,13 @@
   }
   .down {
     color: var(--red);
+  }
+  /* A CNY portfolio follows the China Market convention — 涨红跌绿. */
+  .card.cn .up {
+    color: var(--red);
+  }
+  .card.cn .down {
+    color: var(--green);
   }
   .muted {
     color: var(--muted);

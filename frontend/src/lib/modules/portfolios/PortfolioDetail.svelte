@@ -19,6 +19,7 @@
     fmtNum,
     fmtPct,
     gainPct,
+    isChina,
     CURRENCIES
   } from './api.js';
   import ConfirmModal from '$lib/ui/ConfirmModal.svelte';
@@ -438,6 +439,7 @@
             <ul>
               <li><b>CoinGecko</b> — {$t('portfolios.detail.sourcesInfo.coingecko')}</li>
               <li><b>Yahoo Finance</b> — {$t('portfolios.detail.sourcesInfo.yahoo')}</li>
+              <li><b>China Market</b> — {$t('portfolios.detail.sourcesInfo.china')}</li>
               <li><b>Binance · Kraken · Coinbase</b> — {$t('portfolios.detail.sourcesInfo.exchanges')}</li>
             </ul>
             <p class="ititle">{$t('portfolios.detail.sourcesInfo.limitsTitle')}</p>
@@ -509,7 +511,9 @@
     {/if}
 
     {@const totalPl = data.summary.unrealized + data.summary.realized}
-    <div class="totals">
+    <!-- China Market convention (涨红跌绿) when the portfolio displays in CNY: the palette
+         flips for the totals below, and per asset in the table via its own `cn` class. -->
+    <div class="totals" class:cn={ccy === 'CNY'}>
       <!-- Value and cost basis are balances: a "+" in front of them says nothing.
            Unrealized / realized / total are results, so they carry their sign. -->
       <div class="t">
@@ -611,7 +615,7 @@
           </thead>
           <tbody>
             {#each filteredAssets as a (a.id)}
-              <tr>
+              <tr class:cn={isChina(a)}>
                 <td class="l">
                   <span class="sym">{a.symbol}</span>
                   {#if a.recon_status === 'unresolved'}
@@ -1257,6 +1261,16 @@
   }
   .down {
     color: var(--red);
+  }
+  /* China Market (CNY) rows follow the domestic convention — 涨红跌绿 — so the direction
+     classes keep their meaning and only the palette flips; 0 stays neutral. */
+  tr.cn .up,
+  .totals.cn strong.up {
+    color: var(--red);
+  }
+  tr.cn .down,
+  .totals.cn strong.down {
+    color: var(--green);
   }
   .form {
     display: flex;

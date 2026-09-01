@@ -2,3 +2,6 @@ target/
 **/target/
 **/*.rs.bk
 .git/
+# Excluding Dockerfile keeps COPY . . layer cache valid when only the Dockerfile changes.
+Dockerfile
+.dockerignore

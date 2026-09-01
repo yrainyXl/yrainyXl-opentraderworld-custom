@@ -1140,6 +1140,7 @@
   "portfolios.detail.sourcesInfo.title": "Where prices come from",
   "portfolios.detail.sourcesInfo.coingecko": "crypto spot prices and symbol search (keyless public API).",
   "portfolios.detail.sourcesInfo.yahoo": "stocks and ETFs — last close or live quote, plus symbol search.",
+  "portfolios.detail.sourcesInfo.china": "China A-shares — CNY quotes via the China Market connector (cn-market).",
   "portfolios.detail.sourcesInfo.exchanges": "last trade price, when an asset overrides its source to a specific exchange.",
   "portfolios.detail.sourcesInfo.limitsTitle": "Refreshing too often",
   "portfolios.detail.sourcesInfo.limits": "All sources are free, keyless public endpoints with per-IP rate limits (CoinGecko ~10–30 calls/min; Kraken ~1/sec). One refresh calls every source your assets use.",

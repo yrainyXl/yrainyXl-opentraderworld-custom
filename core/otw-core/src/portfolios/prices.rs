@@ -1,18 +1,20 @@
 //! Price & symbol resolution for the Portfolio Tracker.
 //!
-//! Two providers. Everything is **stored in USD** (the store converts USD → portfolio currency at
-//! read time), which for one of them means converting first:
+//! Three provider families. Everything is **stored in USD** (the store converts USD →
+//! portfolio currency at read time), which for two of them means converting first:
 //!   - **crypto** → CoinGecko (keyless demo). Symbol search resolves against the cached
 //!     `/coins/list` (refetched at most every ~30 min, per CoinGecko's rate limit); spot prices
 //!     come from `/simple/price?vs_currencies=usd` — already USD.
-//!   - **stock/etf** → Yahoo Finance `query1.../v8/finance/chart` (last close) for spot, and
-//!     `query1.../v1/finance/search` for symbol search. A Yahoo quote is in the **listing's**
-//!     currency (Xetra in EUR, SIX in CHF, London in pence), so it is converted to USD with the
-//!     journal's FX rates before being stored; a currency with no rate leaves the asset unpriced
-//!     rather than storing a foreign number in a USD column.
+//!   - **stock/etf** → China A-shares resolve through the China Market connector (cn-market
+//!     service, same code Watchlists uses); every other equity/ETF goes to Yahoo Finance
+//!     `query1.../v8/finance/chart` (last close) for spot, and `query1.../v1/finance/search`
+//!     for symbol search. A Yahoo quote is in the **listing's** currency (Xetra in EUR, SIX in
+//!     CHF, London in pence), and a China quote is in CNY, so both are converted to USD with
+//!     the journal's FX rates before being stored; a currency with no rate leaves the asset
+//!     unpriced rather than storing a foreign number in a USD column.
 //!
 //! Hardcoding USD as the quote sidesteps the BTCUSD vs BTC/USD vs BTC-USD ambiguity: we store the
-//! provider's own id (coin id / Yahoo ticker) and always price it in USD.
+//! provider's own id (coin id / Yahoo ticker / A-share code) and always price it in USD.
 
 use std::time::Duration;
 
@@ -23,6 +25,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::histdata;
 use otw_store::portfolios as store;
 
 const COINGECKO: &str = "https://api.coingecko.com/api/v3";
@@ -137,8 +140,41 @@ pub async fn search_crypto(pool: &PgPool, query: &str) -> Result<Vec<SearchHit>>
     Ok(hits.into_iter().take(25).map(|(_, h)| h).collect())
 }
 
+/// Search stocks/ETFs. A-share queries resolve through the China Market connector (cn-market
+/// service) first — keyless, Chinese names/codes included, unaffected by Yahoo throttling —
+/// and anything cn-market doesn't know falls back to Yahoo so US equities/ETFs keep working.
+/// `class` is the asset class the caller asked for ("stock"|"etf"), applied to cn-market hits;
+/// Yahoo hits carry their own quoteType classification.
+pub async fn search_stock(query: &str, class: &str) -> Result<Vec<SearchHit>> {
+    let cn = china_search_hits(query, class).await.unwrap_or_default();
+    if !cn.is_empty() {
+        return Ok(cn);
+    }
+    search_stock_yahoo(query).await
+}
+
+/// A-share symbol lookup via the China Market connector — the same path Watchlists uses, so
+/// there is exactly one cn-market integration. Non-China queries come back empty.
+async fn china_search_hits(query: &str, asset_class: &str) -> Result<Vec<SearchHit>> {
+    let connector = histdata::connector_for("china")?;
+    let client = histdata::client()?;
+    let hits = connector
+        .search_symbols(&client, &std::collections::HashMap::new(), query, "equity", 10)
+        .await?;
+    Ok(hits
+        .into_iter()
+        .map(|h| SearchHit {
+            asset_class: asset_class.into(),
+            provider: "china".into(),
+            provider_id: h.symbol.clone(),
+            symbol: h.symbol,
+            name: h.name,
+        })
+        .collect())
+}
+
 /// Search stocks/ETFs via Yahoo's search endpoint.
-pub async fn search_stock(query: &str) -> Result<Vec<SearchHit>> {
+async fn search_stock_yahoo(query: &str) -> Result<Vec<SearchHit>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(vec![]);
@@ -273,6 +309,56 @@ async fn to_usd(pool: &PgPool, price: f64, currency: &str) -> Result<Option<f64>
     Ok(otw_store::journal_fx::convert(pool, price, &code, "USD", today).await?)
 }
 
+/// China A-share spot in CNY (last trade). Reuses the China Market connector that
+/// Watchlists quotes through (cn-market service) — no second implementation. The last 1m
+/// close gives a live trade while the market is open; a miss (market closed, intraday
+/// unavailable) falls back to the last daily close, like the Yahoo path.
+async fn china_quote(ticker: &str) -> Result<Option<(f64, String)>> {
+    let connector = histdata::connector_for("china")?;
+    let client = histdata::client()?;
+    let secrets = std::collections::HashMap::new();
+    let now = OffsetDateTime::now_utc();
+    let mut price = None;
+    if let Ok(chunk) = connector
+        .fetch_chunk(
+            &client,
+            &secrets,
+            ticker,
+            "equity",
+            "1m",
+            now - time::Duration::hours(3),
+            now,
+        )
+        .await
+    {
+        price = chunk.bars.last().map(|b| b.close);
+    }
+    if price.is_none() {
+        let chunk = connector
+            .fetch_chunk(
+                &client,
+                &secrets,
+                ticker,
+                "equity",
+                "1d",
+                now - time::Duration::days(10),
+                now,
+            )
+            .await?;
+        price = chunk.bars.last().map(|b| b.close);
+    }
+    Ok(price.map(|p| (p, "CNY".to_string())))
+}
+
+/// A China A-share quote (CNY) converted to USD with the journal's FX rates — the same
+/// treatment a non-USD Yahoo listing gets. `None` when there is no price or no CNY rate.
+async fn china_price_usd(pool: &PgPool, ticker: &str) -> Result<Option<f64>> {
+    let Some((price, _ccy)) = china_quote(ticker).await? else {
+        return Ok(None);
+    };
+    to_usd(pool, price, "CNY").await
+}
+
 // ── Exchange spot prices (keyless, treated as USD) ─────────────────────────────
 //
 // Each exchange has a trivial keyless last-price endpoint. Stablecoin quotes (USDT/USD) are taken
@@ -326,10 +412,12 @@ async fn spot_for(
         Some("kraken") => kraken_price(&a.spot_symbol).await,
         Some("coinbase") => coinbase_price(&a.spot_symbol).await,
         Some("yahoo") => stock_price_usd(pool, &a.spot_symbol).await,
+        Some("china") => china_price_usd(pool, &a.spot_symbol).await,
         Some("coingecko") => Ok(crypto_prices(&[a.spot_symbol.clone()]).await?.get(&a.spot_symbol).copied()),
         // No override: price by the default provider the asset was resolved against.
         _ => match a.provider.as_str() {
             "coingecko" => Ok(crypto.get(&a.provider_id).copied()),
+            "china" => china_price_usd(pool, &a.provider_id).await,
             _ => stock_price_usd(pool, &a.provider_id).await,
         },
     }

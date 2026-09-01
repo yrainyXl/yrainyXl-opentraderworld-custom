@@ -24,6 +24,7 @@
     RATE_WARN_PER_MIN,
     fmtQuote,
     fmtSignedPct,
+    isChinaItem,
     agoLabel
   } from './api.js';
   import { t, locale } from '$lib/i18n';
@@ -465,7 +466,7 @@
           </thead>
           <tbody>
             {#each visible as item (item.id)}
-              <tr>
+              <tr class:china={isChinaItem(item)}>
                 <td>
                   <div class="symcell">
                     <span class="sym">{item.symbol}</span>
@@ -485,13 +486,13 @@
                   {#if item.quote?.error}
                     <span class="quoteerr" title={item.quote.error}><Icon name="alert-triangle" size={12} /></span>
                   {/if}
-                  {fmtQuote(item.quote?.price_usd)}
+                  {fmtQuote(item.quote?.price_usd, item.quote?.currency)}
                 </td>
                 {#each COLS as c (c.key)}
                   {@const v = item.quote?.[c.field]}
                   <td class="num" class:up={v > 0} class:down={v < 0}>{fmtSignedPct(v)}</td>
                 {/each}
-                <td class="sparkcell"><Sparkline values={item.quote?.spark ?? []} /></td>
+                <td class="sparkcell"><Sparkline values={item.quote?.spark ?? []} china={isChinaItem(item)} /></td>
                 <td class="notecell">
                   {#if item.notes}
                     <button class="note" onclick={() => editNote(item)} title={item.notes}>{item.notes}</button>
@@ -867,6 +868,14 @@
   }
   .down {
     color: var(--red);
+  }
+  /* China Market (A-shares) rows follow the domestic convention — 涨红跌绿 — so the
+     direction classes keep their meaning and only the palette flips. 0 stays neutral. */
+  tr.china .up {
+    color: var(--red);
+  }
+  tr.china .down {
+    color: var(--green);
   }
   .ticker {
     font-family: var(--mono);

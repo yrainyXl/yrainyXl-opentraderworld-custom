@@ -121,12 +121,23 @@ import { fmtMoney, fmtSignedPct, EM_DASH } from '$lib/format.js';
 
 export { fmtSignedPct, EM_DASH };
 
-/** USD quote with precision that follows the magnitude (sub-dollar coins need decimals). */
-export function fmtQuote(n) {
+/** Quote with precision that follows the magnitude (sub-dollar/sub-yuan coins need decimals). */
+export function fmtQuote(n, ccy = 'USD') {
   if (n == null || !isFinite(n)) return EM_DASH;
   const abs = Math.abs(n);
   const digits = abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
-  return fmtMoney(n, 'USD', digits);
+  return fmtMoney(n, ccy, digits);
+}
+
+/**
+ * Whether a watchlist row quotes in the China market (A-shares): CNY quote currency or the
+ * `china` provider. Those rows follow the domestic convention — 涨红跌绿 — everywhere the
+ * western 涨绿跌红 would otherwise apply (table cells, sparkline, dashboard widget).
+ */
+export function isChinaItem(item) {
+  const ccy = item?.quote?.currency;
+  if (typeof ccy === 'string' && ccy.toUpperCase() === 'CNY') return true;
+  return item?.provider === 'china';
 }
 
 /** "3m ago" in the app locale (not the browser's), or null for a missing timestamp. */

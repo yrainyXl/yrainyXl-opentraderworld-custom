@@ -120,9 +120,25 @@ export const SPOT_SOURCES = {
     { id: 'kraken', label: 'Kraken', hint: 'pair (e.g. XBTUSDT)' },
     { id: 'coinbase', label: 'Coinbase', hint: 'product (e.g. BTC-USD)' }
   ],
-  stock: [{ id: 'yahoo', label: 'Yahoo', hint: 'ticker (e.g. AAPL)' }],
-  etf: [{ id: 'yahoo', label: 'Yahoo', hint: 'ticker (e.g. SPY)' }]
+  stock: [
+    { id: 'yahoo', label: 'Yahoo', hint: 'ticker (e.g. AAPL)' },
+    { id: 'china', label: 'China Market', hint: 'A-share code (e.g. 601118)' }
+  ],
+  etf: [
+    { id: 'yahoo', label: 'Yahoo', hint: 'ticker (e.g. SPY)' },
+    { id: 'china', label: 'China Market', hint: 'A-share code (e.g. 510300)' }
+  ]
 };
+
+/** Whether an asset follows the China Market convention (涨红跌绿): operated in CNY or
+ *  sourced from the `china` provider. Drives the flipped up/down palette in the tables. */
+export function isChina(asset) {
+  return (
+    asset?.currency === 'CNY' ||
+    asset?.provider === 'china' ||
+    asset?.spot_provider === 'china'
+  );
+}
 
 // Formatting lives in $lib/format.js. The local SYMBOLS table went with it — it mapped
 // JPY and CNY both to "¥", dropped the symbol entirely for any currency it didn't list,

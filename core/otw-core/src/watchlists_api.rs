@@ -263,9 +263,25 @@ async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let hits = match q.kind.as_str() {
-        "crypto" => prices::search_crypto(&state.pool, &q.q).await?,
-        "stock" | "etf" => prices::search_stock(&q.q).await?,
+    let hits: Vec<Value> = match q.kind.as_str() {
+        "crypto" => {
+            let hits = prices::search_crypto(&state.pool, &q.q).await?;
+            hits
+                .into_iter()
+                .map(|h| serde_json::to_value(h).unwrap_or_default())
+                .collect()
+        }
+        // Shared with the Portfolio Tracker: A-share queries resolve through the China
+        // Market connector (cn-market service) first, falling back to Yahoo for US
+        // equities/ETFs — both serialized to the same shape.
+        "stock" | "etf" => {
+            let class = if q.kind == "etf" { "etf" } else { "stock" };
+            let hits = prices::search_stock(&q.q, class).await?;
+            hits
+                .into_iter()
+                .map(|h| serde_json::to_value(h).unwrap_or_default())
+                .collect()
+        }
         _ => return Err(ApiError::bad_request("kind must be 'crypto' or 'stock'")),
     };
     Ok(Json(json!({ "results": hits })))
@@ -288,7 +304,7 @@ async fn add_item(
     Path(id): Path<Uuid>,
     Json(b): Json<AddItemBody>,
 ) -> Result<Json<Value>, ApiError> {
-    if !matches!(b.provider.as_str(), "coingecko" | "yahoo") {
+    if !matches!(b.provider.as_str(), "coingecko" | "yahoo" | "china") {
         return Err(ApiError::bad_request("unknown provider"));
     }
     if !matches!(b.asset_class.as_str(), "crypto" | "stock" | "etf") {

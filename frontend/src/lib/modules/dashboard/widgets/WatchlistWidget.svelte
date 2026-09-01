@@ -2,7 +2,7 @@
   // Watchlist widget: a scrollable quote list for one chosen watchlist — name with the
   // ticker below it, price, 24h and 7d change. Config: { watchlist_id }; unset falls back
   // to the first list. Quotes are read from the server cache, same as the module page.
-  import { watchlistsApi, fmtQuote, fmtSignedPct } from '$lib/modules/watchlists/api.js';
+  import { watchlistsApi, fmtQuote, fmtSignedPct, isChinaItem } from '$lib/modules/watchlists/api.js';
   import { t } from '$lib/i18n';
   import ErrorText from '$lib/ui/ErrorText.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
@@ -34,9 +34,11 @@
     if (!editing) load(wanted);
   });
 
-  function cls(n) {
+  function cls(n, it) {
     if (n == null || !isFinite(n)) return '';
-    return n < 0 ? 'neg' : 'pos';
+    // China Market rows flip the convention — 涨红跌绿 — so a positive move takes the
+    // red palette class and a negative one the green; 0 renders without either.
+    return (n < 0) !== isChinaItem(it) ? 'neg' : 'pos';
   }
 </script>
 
@@ -64,9 +66,9 @@
           <span class="name" title={it.name}>{it.name}</span>
           <span class="ticker">{it.symbol}</span>
         </span>
-        <span class="num price">{fmtQuote(it.quote?.price_usd)}</span>
-        <span class="num {cls(it.quote?.change_24h)}">{fmtSignedPct(it.quote?.change_24h)}</span>
-        <span class="num {cls(it.quote?.change_7d)}">{fmtSignedPct(it.quote?.change_7d)}</span>
+        <span class="num price">{fmtQuote(it.quote?.price_usd, it.quote?.currency)}</span>
+        <span class="num {cls(it.quote?.change_24h, it)}">{fmtSignedPct(it.quote?.change_24h)}</span>
+        <span class="num {cls(it.quote?.change_7d, it)}">{fmtSignedPct(it.quote?.change_7d)}</span>
       </div>
     {/each}
   </div>

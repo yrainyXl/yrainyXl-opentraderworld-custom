@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 use otw_store::histdata::Bar;
 
 mod binance;
+pub(crate) mod china;
 mod coinbase;
 mod generic;
 mod kraken;
@@ -175,6 +176,7 @@ fn all_connectors() -> Vec<Box<dyn Connector>> {
         Box::new(binance::Binance),
         Box::new(coinbase::Coinbase),
         Box::new(kraken::Kraken),
+        Box::new(china::China),
         Box::new(generic::alphavantage()),
         Box::new(generic::eodhd()),
         Box::new(generic::yahoo()),

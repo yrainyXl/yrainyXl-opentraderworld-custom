@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Watchlists: China Market (A-share/CNY) rows follow the domestic convention — 涨红跌绿 — in the quotes table, sparklines and the dashboard widget; all other markets keep 涨绿跌红, and 0 stays neutral.
+- Portfolio Tracker: A-shares can be searched, added (provider `china`, operations in CNY) and priced through the China Market connector (cn-market) — same integration Watchlists uses; CNY quotes are converted to USD via the journal FX rates, and CNY portfolios/assets follow 涨红跌绿. Yahoo/CoinGecko pricing is untouched.
+
 ## [0.0.8] - 2026-08-16
 
 ### Added

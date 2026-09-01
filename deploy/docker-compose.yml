@@ -79,6 +79,9 @@ services:
       OTW_LOG: ${OTW_LOG:-info}
       DATABASE_URL: ${DATABASE_URL}
       OTW_UPLOAD_DIR: /data/uploads
+      # China Market connector base URL — the cn-market service on this compose network.
+      # Kept unauthenticated: cn-market only listens on the internal network (no ports map).
+      OTW_CN_MARKET_URL: http://cn-market:18080
       # Secret-free network config core rewrites from Settings → Network (bind-mounted below).
       OTW_NETWORK_ENV: /config/network.env
       # ACME DNS-challenge line for Caddy, also rewritten from Settings → Network.
@@ -103,6 +106,17 @@ services:
       - ./dns.env:/config/dns.env
     expose:
       - "8080"
+
+  # ── CN market data service: Tencent/Sina A-share quotes & K-lines ─────────────
+  # Python/FastAPI, internal only (no ports mapped to the host): the China Market
+  # connector in core reaches it by service name on the compose network.
+  cn-market:
+    image: otw-cn-market:latest
+    build:
+      context: ../../cn-market
+    restart: unless-stopped
+    expose:
+      - "18080"
 
   # ── DNS-over-HTTPS forwarder: caddy's resolver (see the `dns:` key up there) ─
   dns-proxy:

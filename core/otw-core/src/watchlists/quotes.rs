@@ -148,7 +148,7 @@ fn daily_closes(series: &[(i64, f64)]) -> Vec<(i64, f64)> {
 /// open (the usual intraday "day change") and on the close before the just-finished
 /// session after hours — so a closed market shows the last session's move, not 0%.
 /// `spark` is the completed daily closes with the live spot appended.
-fn compute_quote(history: &[(i64, f64)], live: f64, now_sec: i64) -> Value {
+fn compute_quote(history: &[(i64, f64)], live: f64, now_sec: i64, currency: &str) -> Value {
     let daily = daily_closes(history);
     let today = now_sec / 86_400;
     // Completed sessions only: the provider's point for the current UTC day is a partial
@@ -170,6 +170,9 @@ fn compute_quote(history: &[(i64, f64)], live: f64, now_sec: i64) -> Value {
 
     json!({
         "price_usd": live,
+        // Quote currency so the UI can render the right symbol (USD for crypto/Yahoo,
+        // CNY for the China Market connector). The `price_usd` key is a legacy name.
+        "currency": currency,
         "change_24h": ref_at(1).and_then(|r| pct(live, r)),
         "change_3d": ref_at(3).and_then(|r| pct(live, r)),
         "change_7d": ref_at(7).and_then(|r| pct(live, r)),
@@ -211,9 +214,15 @@ async fn quote_item(
             let live = live
                 .or_else(|| series.last().map(|(_, v)| *v))
                 .ok_or_else(|| anyhow!("no price for {}", item.provider_id))?;
-            let quote = compute_quote(&series, live, now_sec);
+            let quote = compute_quote(&series, live, now_sec, "USD");
             store::set_item_quote(pool, item.id, &quote, exchange.as_deref()).await?;
             Ok(true)
+        }
+        // A-share items go through the China Market connector (cn-market service),
+        // which the provider-less Auto path reaches the same way a pinned connector does.
+        "china" => {
+            let cx = ConnectorCx::direct(Box::new(crate::histdata::china::China))?;
+            quote_via_connector(pool, &cx, item).await.map(|()| true)
         }
         _ => {
             let live = match crypto_spot {
@@ -230,7 +239,7 @@ async fn quote_item(
             let live = live
                 .or_else(|| history.last().map(|(_, v)| *v))
                 .ok_or_else(|| anyhow!("no price for {}", item.provider_id))?;
-            let quote = compute_quote(&history, live, now_sec);
+            let quote = compute_quote(&history, live, now_sec, "USD");
             store::set_item_quote(pool, item.id, &quote, None).await?;
             Ok(fetched)
         }
@@ -411,6 +420,18 @@ impl ConnectorCx {
                 .await?;
         Ok(Self { connector, cap, secrets, client: crate::histdata::client()? })
     }
+
+    /// A keyless, credential-free connector context (no DB row needed) — used by the
+    /// provider-addressed Auto path for providers like `china` that need no secrets.
+    fn direct(connector: Box<dyn Connector>) -> Result<Self> {
+        let cap = connector.capability();
+        Ok(Self {
+            connector,
+            cap,
+            secrets: HashMap::new(),
+            client: crate::histdata::client()?,
+        })
+    }
 }
 
 /// Watchlist asset_class → histdata asset_type vocabulary.
@@ -434,6 +455,8 @@ pub fn default_quote_ticker(provider: &str, asset_class: &str, symbol: &str) -> 
         "alpaca" if crypto => format!("{s}/USD"),
         "massive" if crypto => format!("{s}USD"),
         "yahoo" if crypto => format!("{s}-USD"),
+        // China Market takes the bare 6-digit A-share code (601118).
+        "china" => s,
         // EODHD addresses everything with an exchange suffix.
         "eodhd" if crypto => format!("{s}-USD.CC"),
         "eodhd" => format!("{s}.US"),
@@ -511,7 +534,9 @@ async fn quote_via_connector(pool: &PgPool, cx: &ConnectorCx, item: &store::Item
         .or_else(|| history.last().map(|(_, v)| *v))
         .ok_or_else(|| anyhow!("no price for {ticker}"))?;
 
-    let quote = compute_quote(&history, live, now_sec);
+    // Quote currency follows the connector: China Market quotes in CNY, everything else USD.
+    let currency = if cx.cap.provider == "china" { "CNY" } else { "USD" };
+    let quote = compute_quote(&history, live, now_sec, currency);
     store::set_item_quote(pool, item.id, &quote, None).await
 }
 
@@ -542,7 +567,7 @@ mod tests {
         let history: Vec<(i64, f64)> = (0..31)
             .map(|i| ((1_000 - 31 + i) * DAY, 100.0 + i as f64))
             .collect();
-        let q = compute_quote(&history, 132.0, now);
+        let q = compute_quote(&history, 132.0, now, "USD");
         // 24h cutoff lands mid-yesterday → yesterday's midnight close 130 → +2/130.
         let c24 = q["change_24h"].as_f64().unwrap();
         assert!((c24 - 2.0 / 130.0 * 100.0).abs() < 1e-9);
@@ -560,7 +585,7 @@ mod tests {
         let now = 1_000 * DAY + DAY / 2;
         // Yesterday's close 100, plus a partial point for today at 105 — live is 102.
         let history = vec![((999) * DAY, 100.0), (1_000 * DAY + 3_600, 105.0)];
-        let q = compute_quote(&history, 102.0, now);
+        let q = compute_quote(&history, 102.0, now, "USD");
         assert!((q["change_24h"].as_f64().unwrap() - 2.0).abs() < 1e-9);
         let spark = q["spark"].as_array().unwrap();
         assert_eq!(spark.len(), 2); // yesterday + live, no duplicated today point
@@ -573,7 +598,7 @@ mod tests {
         let bar = 13 * 3_600 + 1_800;
         let history = vec![(998 * DAY + bar, 100.0), (999 * DAY + bar, 103.0)];
         let now = 1_000 * DAY + 10 * 3_600; // next morning, market closed
-        let q = compute_quote(&history, 103.0, now);
+        let q = compute_quote(&history, 103.0, now, "USD");
         assert!((q["change_24h"].as_f64().unwrap() - 3.0).abs() < 1e-9);
     }
 
@@ -581,7 +606,7 @@ mod tests {
     fn short_history_yields_null_long_horizons() {
         let now = 1_000 * DAY;
         let history = vec![(999 * DAY, 50.0)];
-        let q = compute_quote(&history, 55.0, now);
+        let q = compute_quote(&history, 55.0, now, "USD");
         assert!(q["change_24h"].as_f64().is_some());
         assert!(q["change_30d"].is_null());
     }

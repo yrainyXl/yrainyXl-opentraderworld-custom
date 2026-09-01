@@ -1,7 +1,8 @@
 <script>
   // Add an asset to a portfolio. Pick the class (crypto / stock-etf), search the provider, and
   // select an exact match — we store the provider's own id so pricing is never ambiguous
-  // (BTC vs BTC/USD vs BTC-USD). Crypto → CoinGecko, stocks/ETFs → Yahoo.
+  // (BTC vs BTC/USD vs BTC-USD). Crypto → CoinGecko, China A-shares → China Market (cn-market),
+  // everything else stock/ETF → Yahoo.
   import Modal from '$lib/ui/Modal.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
   import { portfoliosApi, CURRENCIES } from './api.js';
@@ -60,6 +61,9 @@
     adding = true;
     error = '';
     try {
+      // China Market (A-share) assets always operate in CNY, whatever the portfolio's
+      // display currency; mirror that in the selector so the next add starts there too.
+      if (hit.provider === 'china') currency = 'CNY';
       await portfoliosApi.addAsset(portfolioId, {
         asset_class: hit.asset_class,
         provider: hit.provider,

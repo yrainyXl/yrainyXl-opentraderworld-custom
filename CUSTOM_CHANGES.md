@@ -1,0 +1,144 @@
+# CUSTOM_CHANGES.md — OpenTraderWorld 私有定制变更记录
+
+> **定位**：本文件记录本私有分支相对 OTW upstream 的全部重要定制，是「Upstream 可升级性」的核心配套文档（见 `CUSTOM_ARCHITECTURE.md` §9.3）。
+>
+> **使用规则**：
+> - 每次完成一项定制，必须在本文件追加一条变更记录（原因 / 文件 / migration / 冲突点 / 验证 / 回滚）。
+> - 新建 migration 之前，必须先查本文件「§3 Migration 编号登记」，禁止与 upstream 或已有 custom 编号冲突。
+> - 升级 upstream 前后，按「§5 Upstream 升级检查清单」逐项核对。
+> - 本文件只记录**定制事实**，不写临时 bug 修复与一次性调试日志。
+
+---
+
+## 1. 定制总览（已完成 · Phase 0 稳定区）
+
+| # | 定制项 | 状态 |
+|---|---|---|
+| 1 | China Market sidecar（`cn-market`，腾讯主 + 新浪 fallback） | ✅ 已完成 / 稳定 |
+| 2 | Watchlist 支持 A 股（provider `china`，搜索 / 添加 / 刷新 / 行情展示） | ✅ 已完成 / 稳定 |
+| 3 | Portfolio Tracker 支持 A 股（CNY 资产、买入卖出、实时定价、盈亏） | ✅ 已完成 / 稳定 |
+| 4 | CNY 币种支持（A 股资产以 CNY 记账，按 Journal FX 汇率折算 USD） | ✅ 已完成 / 稳定 |
+| 5 | 涨红跌绿（A 股/CNY 行按国内习惯：涨红跌绿；其他市场保持涨绿跌红） | ✅ 已完成 / 稳定 |
+| 6 | Custom migrations（`0100`、`0101`，编号段 0100+ 为私有保留段） | ✅ 已完成 / 稳定 |
+| 7 | Docker / Rust 构建适配（国内镜像源 + BuildKit Cargo 缓存） | ✅ 已完成 / 稳定 |
+
+已人工验证的链路（以 `601118 海南橡胶` 为例）：Watchlist 搜索 → 添加 → 刷新价格；Portfolio 添加 CNY 资产 → 记录买入/卖出 → 刷新实时价 → 成本/持仓/市值/盈亏计算正确；行情/盈亏按涨红跌绿显示。
+
+**这是后续所有开发的基础，不要推翻重做。**
+
+---
+
+## 2. 变更记录
+
+### C-001 cn-market（China Market sidecar）
+
+- **修改原因**：为 OTW 提供 A 股行情（腾讯为主源，新浪为 fallback），隔离国内数据源细节，避免散落进 OTW Rust 各模块。
+- **修改文件**：
+  - `/opt/apps/cn-market/app.py`（FastAPI：`search_instruments` / `get_spot` / `get_bars`；腾讯主源 + 新浪 fallback）
+  - `/opt/apps/cn-market/Dockerfile`、`requirements.txt`、`AGENTS.md`
+  - `deploy/docker-compose.yml`：新增 `cn-market` 服务（`image: otw-cn-market:latest`，build context `../../cn-market`，**无端口映射**，仅 Docker 内部网络可达）；Core 环境变量 `OTW_CN_MARKET_URL=http://cn-market:18080`
+- **数据库 migration**：无（独立服务，不触碰 OTW 数据库）。
+- **API 契约**：Instrument / Quote / Bars 契约见 `CUSTOM_ARCHITECTURE.md` §7.3，需保持向后兼容。
+- **Upstream 潜在冲突点**：低。新增独立服务与独立 env 变量；`OTW_CN_MARKET_URL` 为私有变量名，upstream 无此配置。
+- **如何验证**：`docker compose up -d cn-market` 后，Watchlist 搜索 `601118`、添加、刷新；`curl $OTW_CN_MARKET_URL/...` 检查 quote 返回 `source: tencent`，腾讯失败时 `fallback: true`（新浪）。
+- **如何回滚**：从 `deploy/docker-compose.yml` 移除 `cn-market` 服务与 `OTW_CN_MARKET_URL`，重建 Core；A 股行情入口随之不可用，其他市场不受影响。
+
+### C-002 Watchlist 支持 A 股
+
+- **修改原因**：Watchlist 可搜索、添加、刷新 A 股，并展示价格、24h/3d/7d/30d 变化、30 天趋势、CNY 币种、涨红跌绿。
+- **修改文件**（主要）：
+  - Rust：`core/otw-core/src/watchlists/quotes.rs`、`core/otw-core/src/watchlists_api.rs`、`core/otw-core/src/histdata/china.rs`、`core/otw-core/src/histdata/mod.rs`
+  - 前端：`frontend/src/lib/modules/watchlists/WatchlistDetail.svelte`、`frontend/src/lib/modules/watchlists/api.js`、`frontend/src/lib/modules/watchlists/Sparkline.svelte`、`frontend/src/lib/modules/dashboard/widgets/WatchlistWidget.svelte`
+- **数据库 migration**：`0100_china_provider.sql` —— `watchlist_items.provider` CHECK 增加 `'china'`；种子插入 `China Market` 连接器（`histdata_connectors` + `connector_modules` 全模块授权，`ON CONFLICT DO NOTHING`）。
+- **Upstream 潜在冲突点**：
+  - `watchlist_items_provider_check` 约束被重建（DROP + ADD），若 upstream 新增其他 provider 值，合并时需把 upstream 的值一并保留。
+  - 种子连接器「China Market」与 upstream 种子数据模式（0047 系列）可能叠加，注意 `ON CONFLICT` 语义。
+- **如何验证**：Watchlist 搜索/添加/刷新 `601118 海南橡胶`；检查价格与涨跌颜色（红涨绿跌）、CNY 币种展示、Sparkline 趋势。
+- **如何回滚**：撤销 `0100`（恢复 provider CHECK 到 upstream 原值，删除种子连接器），并还原上述 Rust/前端文件。
+
+### C-003 Portfolio Tracker 支持 A 股 + CNY + 涨红跌绿
+
+- **修改原因**：Portfolio 可搜索 A 股、添加 CNY 资产、记录买入/卖出 operation、刷新实时价格、计算成本/持仓/市值/已实现与未实现盈亏，并按 A 股习惯显示颜色。
+- **修改文件**（主要）：
+  - Rust：`core/otw-core/src/portfolios/prices.rs`（china 定价 + CNY→USD 按 Journal FX 汇率折算）、`core/otw-core/src/portfolios_api.rs`
+  - 前端：`frontend/src/lib/modules/portfolios/AddAssetModal.svelte`、`frontend/src/lib/modules/portfolios/PortfolioDetail.svelte`、`frontend/src/lib/modules/portfolios/ReconcileModal.svelte`、`frontend/src/lib/modules/portfolios/api.js`、`frontend/src/routes/portfolios/+page.svelte`
+- **数据库 migration**：`0101_portfolio_china.sql` —— `portfolio_assets.provider` CHECK 增加 `'china'`；`spot_provider` 允许 `'china'`。
+- **Upstream 潜在冲突点**：
+  - `portfolio_assets_provider_check` / `portfolio_assets_spot_provider_check` 被重建，upstream 若扩展 provider/spot_provider 枚举需合并保留。
+  - CNY 折算逻辑基于 Journal FX 汇率表，若 upstream 汇率表结构变化需同步调整 `portfolios/prices.rs`。
+- **如何验证**：添加 A 股资产（CNY）→ 记录买入 → 刷新价格 → 校验成本/持仓/市值/浮盈亏；跨币种组合价值（CNY→USD）正确；颜色按涨红跌绿。
+- **如何回滚**：撤销 `0101` 并还原 `portfolios/prices.rs`、`portfolios_api.rs` 与前端文件。
+
+### C-004 涨红跌绿（A 股配色约定）
+
+- **修改原因**：国内习惯「涨红跌绿」；upstream 默认「涨绿跌红」。仅 A 股/CNY 行启用国内约定，其他市场保持原样，0 涨跌保持中性。
+- **修改文件**：前端共享格式与各展示组件（`WatchlistDetail.svelte`、`Sparkline.svelte`、`WatchlistWidget.svelte`、`PortfolioDetail.svelte`、`portfolios/+page.svelte` 等，随 C-002/C-003 一并修改）。
+- **数据库 migration**：无。
+- **Upstream 潜在冲突点**：中。前端共享格式函数若被 upstream 重构（§9.4 第 8 项检查点），配色判定逻辑需重新合入。
+- **如何验证**：A 股上涨行显示红色、下跌行绿色；美股/加密行仍为绿涨红跌。
+- **如何回滚**：还原前端格式函数中的 CN 分支判定。
+
+### C-005 Docker / Rust 构建适配（国内网络 + BuildKit 缓存）
+
+- **修改原因**：`gcr.io`、`static.rust-lang.org`、`crates.io` 在服务器网络不稳定；同时要求后续 Rust 小改显著复用编译缓存，禁止反复冷启动 release build。
+- **修改文件**：`core/Dockerfile`（私有重写）。
+  - Rust 工具链/依赖源：`ENV RUSTUP_DIST_SERVER=https://rsproxy.cn`、`RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup`；`$CARGO_HOME/config.toml` 走 `sparse+https://rsproxy.cn/index/`，`git-fetch-with-cli = true`。
+  - BuildKit 缓存：`RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/build/target cargo build --release --bin otw-core`，并在**同一个 RUN** 内把 binary 复制到普通目录 `/out/otw-core`，供 runtime stage COPY。
+  - Runtime 基础镜像：`gcr.m.daocloud.io/distroless/cc-debian12`（DaoCloud 镜像替代 gcr.io）；非 root `USER 65532`；`/data/uploads` 预建并 chown 65532。
+- **数据库 migration**：无。
+- **Upstream 潜在冲突点**：高。upstream 若修改 Dockerfile（基础镜像、构建方式、运行时配置），需手动合入本文件的镜像源与缓存设计。
+- **如何验证**：第一次冷编译可慢；随后修改少量 Rust 文件重新 build，应显著复用 registry/git/target 缓存（观察 BuildKit 缓存命中日志），且不触发网络重下载。
+- **如何回滚**：恢复 upstream Dockerfile（注意同时失去国内镜像与缓存加速）。
+
+---
+
+## 3. Migration 编号登记
+
+**编号策略（长期约定）**：
+
+- `0001`–`0099`：upstream 编号段，**禁止占用**。
+- `0100`+：私有定制保留段，与 upstream 撞号风险最低。
+- 每次新建前：① 查 upstream 最新 migration 编号；② 查本表已占用编号；③ 再确认本地 `core/otw-store/migrations/` 实际文件。
+
+**已占用（custom）**：
+
+| 编号 | 文件 | 内容 | 状态 |
+|---|---|---|---|
+| 0100 | `0100_china_provider.sql` | Watchlist：`provider='china'` + 种子 China Market 连接器 | ✅ 已应用 |
+| 0101 | `0101_portfolio_china.sql` | Portfolio：`provider='china'` + `spot_provider='china'` | ✅ 已应用 |
+
+**基线**：接入定制时 upstream 最新 migration 为 `0091_findb_fav_key.sql`（2026-09-01 确认）。
+
+**其他保障**：`core/otw-store/build.rs` 已保留 `println!("cargo:rerun-if-changed=migrations")`，migration 文件变化会自动触发 `sqlx::migrate!` 重编译；禁止通过修改 `lib.rs` 注释强制重建。
+
+---
+
+## 4. 构建 / 部署要点
+
+- 开发期：`cargo check -p otw-core` → 必要 `cargo test -p otw-core` → 全部通过后才做**一次** Docker release build（禁止每改几行就 release build）。
+- 部署默认**不做破坏性操作**：禁止 `docker compose down -v`、删 PostgreSQL volume、清用户数据、重置 connectors/settings；只重建必要服务并保留数据卷。
+- `cn-market` 只监听 Docker 内部网络（无端口映射），对宿主机不可见。
+
+---
+
+## 5. Upstream 升级检查清单
+
+升级 OTW 前后必须逐项检查（对应 `CUSTOM_ARCHITECTURE.md` §9.4）：
+
+1. migrations 是否撞号（对照 §3 编号登记）。
+2. Connector / Market API 是否变化（`OTW_CN_MARKET_URL` 消费方、`cn-market` 契约）。
+3. Watchlist API 是否变化（`watchlists_api.rs`、前端 `watchlists/api.js`）。
+4. Portfolio API 是否变化（`portfolios_api.rs`、前端 `portfolios/api.js`）。
+5. Editor document schema 是否变化。
+6. MCP catalog 是否变化。
+7. Dockerfile 是否变化（合并 C-005 的镜像源/缓存设计）。
+8. 前端共享格式函数是否变化（涨红跌绿判定、币种/价格格式化）。
+
+---
+
+## 6. 文档协作基线（2026-09-01 建立）
+
+- `AGENTS.md`（仓库根目录）：所有开发 session 的 standing orders；要求任何架构/功能开发前先读 `CUSTOM_ARCHITECTURE.md`。
+- `CUSTOM_ARCHITECTURE.md`（仓库根目录）：**唯一权威**的长期架构 Source of Truth，完整内容只保存在本文件；架构性决策只修改本文件。
+- `docs/design/OOTW_LONG_TERM_ARCHITECTURE.md`：仅保留指向 `../../CUSTOM_ARCHITECTURE.md` 的简短 pointer（7 行），不保存完整副本；其他文件只能引用，不得复制完整架构内容。
+- `/opt/apps/cn-market/AGENTS.md`：sidecar 自己的开发纪律，并指向 `CUSTOM_ARCHITECTURE.md`。
