@@ -277,10 +277,20 @@
     color: var(--red);
   }
   .case {
+    height: 100%;
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     padding: var(--space-4);
+    /* Module pages scroll inside the app shell (100vh grid) — same pattern as
+       portfolios/watchlists: the page fills the content cell and scrolls
+       vertically as content grows. */
+    overflow-y: auto;
+  }
+  /* Never compress sections (timeline growth must push the page longer, and the
+     research editor must keep its full editing height). */
+  .case > * {
+    flex-shrink: 0;
   }
   .head h1 {
     margin: 0;
@@ -434,6 +444,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: var(--space-2);
-    min-height: 200px;
+    /* Comfortable editing area regardless of how much content sits above;
+       the page scrolls instead of compressing the editor. */
+    min-height: 480px;
   }
 </style>
