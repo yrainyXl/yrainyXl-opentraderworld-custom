@@ -71,6 +71,10 @@ pub struct Operation {
     pub price: f64,
     pub fee: f64,
     pub note: String,
+    /// When the operation was actually entered — the tie-break that restores
+    /// the real order of same-day operations in position accounting.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -365,7 +369,7 @@ pub async fn set_recon(
 
 pub async fn list_operations(pool: &PgPool, asset_id: Uuid) -> anyhow::Result<Vec<Operation>> {
     Ok(sqlx::query_as::<_, Operation>(
-        "SELECT id, asset_id, side, op_date, quantity, price, fee, note \
+        "SELECT id, asset_id, side, op_date, quantity, price, fee, note, created_at \
          FROM portfolio_operations WHERE asset_id = $1 ORDER BY op_date DESC, created_at DESC",
     )
     .bind(asset_id)
@@ -381,8 +385,8 @@ pub async fn list_portfolio_operations(
     pool: &PgPool,
     portfolio_id: Uuid,
 ) -> anyhow::Result<Vec<(Operation, String, String)>> {
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Date, f64, f64, f64, String, String, String)>(
-        "SELECT o.id, o.asset_id, o.side, o.op_date, o.quantity, o.price, o.fee, o.note, a.symbol, a.currency \
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Date, f64, f64, f64, String, OffsetDateTime, String, String)>(
+        "SELECT o.id, o.asset_id, o.side, o.op_date, o.quantity, o.price, o.fee, o.note, o.created_at, a.symbol, a.currency \
          FROM portfolio_operations o JOIN portfolio_assets a ON a.id = o.asset_id \
          WHERE a.portfolio_id = $1 ORDER BY o.op_date DESC, o.created_at DESC",
     )
@@ -392,9 +396,15 @@ pub async fn list_portfolio_operations(
     .context("listing portfolio operations")?;
     Ok(rows
         .into_iter()
-        .map(|(id, asset_id, side, op_date, quantity, price, fee, note, symbol, currency)| {
-            (Operation { id, asset_id, side, op_date, quantity, price, fee, note }, symbol, currency)
-        })
+        .map(
+            |(id, asset_id, side, op_date, quantity, price, fee, note, created_at, symbol, currency)| {
+                (
+                    Operation { id, asset_id, side, op_date, quantity, price, fee, note, created_at },
+                    symbol,
+                    currency,
+                )
+            },
+        )
         .collect())
 }
 
@@ -415,7 +425,7 @@ pub async fn add_operation(
     Ok(sqlx::query_as::<_, Operation>(
         "INSERT INTO portfolio_operations (id, asset_id, portfolio_id, side, op_date, quantity, price, fee, note) \
          VALUES ($1,$2,(SELECT portfolio_id FROM portfolio_assets WHERE id = $2),$3,$4,$5,$6,$7,$8) \
-         RETURNING id, asset_id, side, op_date, quantity, price, fee, note",
+         RETURNING id, asset_id, side, op_date, quantity, price, fee, note, created_at",
     )
     .bind(Uuid::new_v4())
     .bind(asset_id)
@@ -441,7 +451,63 @@ pub async fn delete_operation(pool: &PgPool, id: Uuid) -> anyhow::Result<()> {
 
 // ── Derived position & PnL (weighted-average cost, USD ledger) ─────────────────
 
-/// Walk an asset's operations (oldest first) accumulating an average-cost position, in USD.
+/// Chronological operation order for position accounting: business date first,
+/// then the real entry order (`created_at`) as the same-day tie-break, then `id`
+/// only as a deterministic final tie-break (ids carry no business meaning).
+fn sorted_operations(ops: &[Operation]) -> Vec<&Operation> {
+    let mut chrono: Vec<&Operation> = ops.iter().collect();
+    chrono.sort_by(|a, b| {
+        a.op_date
+            .cmp(&b.op_date)
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    chrono
+}
+
+/// Pure long-only accumulation core (unit-testable without a database).
+/// `resolve` maps one operation to its (price, fee) pair — USD passes them
+/// through; other currencies resolve them at the operation's own date's FX.
+///
+/// Sell semantics are consistent long-only accounting: a sell realizes against
+/// the currently held quantity only (`sold = min(quantity, held)`); the fee
+/// scales with the covered portion; a sell with nothing held has NO effect
+/// (no short selling, no phantom proceeds/realized).
+fn accumulate_position<'a>(
+    chrono: impl Iterator<Item = &'a Operation>,
+    mut resolve: impl FnMut(&Operation) -> (f64, f64),
+) -> (f64, f64, f64) {
+    let (mut qty, mut basis, mut realized) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for op in chrono {
+        let (price, fee) = resolve(op);
+        if op.side == "buy" {
+            qty += op.quantity;
+            basis += op.quantity * price + fee;
+        } else {
+            // Sell (long-only): realize only against the currently held quantity.
+            let avg = if qty > 0.0 { basis / qty } else { 0.0 };
+            let sold = op.quantity.min(qty.max(0.0));
+            if sold <= 0.0 {
+                // Nothing held: a sell has no P&L effect at all (no short selling).
+                continue;
+            }
+            // Proceeds and fee both scale with the COVERED portion, so quantity
+            // semantics stay consistent when a sell exceeds the position.
+            let proceeds = sold * price - fee * (sold / op.quantity);
+            realized += proceeds - sold * avg;
+            qty -= sold;
+            basis -= sold * avg;
+            if qty <= 0.0 {
+                qty = 0.0;
+                basis = 0.0;
+            }
+        }
+    }
+    (qty, basis.max(0.0), realized)
+}
+
+/// Walk an asset's operations (chronologically — business date, then entry
+/// order) accumulating an average-cost position, in USD.
 /// Returns (open_qty, open_cost_basis_usd, realized_pnl_usd). Buy fee is added to basis;
 /// sell fee reduces proceeds.
 ///
@@ -453,12 +519,12 @@ pub(crate) async fn position_usd(
     ops: &[Operation],
     currency: &str,
 ) -> anyhow::Result<(f64, f64, f64)> {
-    let mut chrono: Vec<&Operation> = ops.iter().collect();
-    chrono.sort_by(|a, b| a.op_date.cmp(&b.op_date));
-    let (mut qty, mut basis, mut realized) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let chrono = sorted_operations(ops);
     let mut fx = journal_fx::FxCache::new();
-    for op in chrono {
-        // Convert the per-unit price and the fee at the operation's date.
+    // Resolve every operation's (price, fee) first (async, per-date FX), then run
+    // the pure accumulator over the resolved pairs.
+    let mut resolved: Vec<(f64, f64)> = Vec::with_capacity(chrono.len());
+    for op in &chrono {
         let (price, fee) = if currency == "USD" {
             (op.price, op.fee)
         } else {
@@ -467,24 +533,15 @@ pub(crate) async fn position_usd(
                 fx.convert(pool, op.fee, currency, "USD", op.op_date).await?.unwrap_or(op.fee),
             )
         };
-        if op.side == "buy" {
-            qty += op.quantity;
-            basis += op.quantity * price + fee;
-        } else {
-            // Sell: realize against current average cost.
-            let avg = if qty > 0.0 { basis / qty } else { 0.0 };
-            let sold = op.quantity.min(qty.max(0.0));
-            let proceeds = op.quantity * price - fee;
-            realized += proceeds - sold * avg;
-            qty -= op.quantity;
-            basis -= sold * avg;
-            if qty <= 0.0 {
-                qty = 0.0;
-                basis = 0.0;
-            }
-        }
+        resolved.push((price, fee));
     }
-    Ok((qty, basis.max(0.0), realized))
+    let mut i = 0;
+    Ok(accumulate_position(chrono.into_iter(), |op| {
+        let r = resolved[i];
+        i += 1;
+        let _ = op;
+        r
+    }))
 }
 
 /// Build the computed view for one asset, converting USD figures to `currency` on `date`.
@@ -636,4 +693,125 @@ pub async fn set_coingecko_cache(pool: &PgPool, coins: &serde_json::Value) -> an
     .await
     .context("writing coingecko cache")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+    use time::macros::{date, datetime};
+
+    fn op(
+        side: &str,
+        d: Date,
+        t: OffsetDateTime,
+        quantity: f64,
+        price: f64,
+        fee: f64,
+    ) -> Operation {
+        Operation {
+            id: Uuid::new_v4(),
+            asset_id: Uuid::new_v4(),
+            side: side.to_string(),
+            op_date: d,
+            quantity,
+            price,
+            fee,
+            note: String::new(),
+            created_at: t,
+        }
+    }
+
+    /// Identity resolution: amounts are already "USD" (no FX conversion), so the
+    /// accumulator runs exactly like the USD branch of position_usd.
+    fn accumulate(ops: Vec<Operation>) -> (f64, f64, f64) {
+        let chrono = sorted_operations(&ops);
+        accumulate_position(chrono.into_iter(), |op| (op.price, op.fee))
+    }
+
+    fn near(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn same_day_buy_then_sell_uses_entry_order() {
+        // A: BUY 100 @ 56.50 then SELL 50 @ 56.00, same day, BUY entered first.
+        let ops = vec![
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:33:38 UTC), 100.0, 56.50, 0.0),
+            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 15:34:29 UTC), 50.0, 56.00, 0.0),
+        ];
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 50.0);
+        near(basis, 2825.0);
+        near(basis / qty, 56.50);
+        near(realized, -25.0);
+    }
+
+    #[test]
+    fn cross_day_buy_then_sell() {
+        // B: BUY on one day, SELL on a later day — same expected accounting.
+        let ops = vec![
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 09:00:00 UTC), 100.0, 56.50, 0.0),
+            op("sell", date!(2026 - 09 - 02), datetime!(2026-09-02 09:00:00 UTC), 50.0, 56.00, 0.0),
+        ];
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 50.0);
+        near(basis, 2825.0);
+        near(realized, -25.0);
+    }
+
+    #[test]
+    fn same_day_full_exit() {
+        // C: BUY 100 then SELL 100 same day → flat, zero basis.
+        let ops = vec![
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 10:00:00 UTC), 100.0, 56.50, 0.0),
+            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 100.0, 56.00, 0.0),
+        ];
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 0.0);
+        near(basis, 0.0);
+        near(realized, -50.0); // round trip at a loss: 100*(56.00-56.50)
+    }
+
+    #[test]
+    fn same_day_mixed_sequence_follows_entry_order() {
+        // D: BUY 100 / SELL 50 / BUY 20, same day, strictly by created_at.
+        let ops = vec![
+            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 15:01:00 UTC), 50.0, 12.0, 0.0),
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:00:00 UTC), 100.0, 10.0, 0.0),
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:02:00 UTC), 20.0, 10.0, 0.0),
+        ];
+        // The Vec is deliberately NOT in chronological order — the sort must fix it.
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 70.0);
+        near(basis, 700.0);
+        near(basis / qty, 10.0);
+        near(realized, 100.0); // SELL 50 @12 vs avg 10
+    }
+
+    #[test]
+    fn oversell_is_consistent_long_only() {
+        // E: hold 20, sell 50 → realized only on the COVERED 20 shares; the
+        // uncovered remainder is dropped (no short selling, no phantom profit).
+        let ops = vec![
+            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 10:00:00 UTC), 20.0, 10.0, 0.0),
+            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 50.0, 12.0, 0.0),
+        ];
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 0.0);
+        near(basis, 0.0);
+        // 20 covered shares: 20*(12-10)=40. NOT 50*12=600-based fake profit.
+        near(realized, 40.0);
+    }
+
+    #[test]
+    fn sell_with_nothing_held_has_no_effect() {
+        // Defensive: SELL into a zero position must not fabricate proceeds.
+        let ops = vec![
+            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 50.0, 56.00, 0.0),
+        ];
+        let (qty, basis, realized) = accumulate(ops);
+        near(qty, 0.0);
+        near(basis, 0.0);
+        near(realized, 0.0);
+    }
 }

@@ -4903,5 +4903,7 @@
   "investmentCases.research.untitled": "Untitled",
   "investmentCases.research.saving": "Saving…",
   "investmentCases.research.saved": "Saved",
-  "investmentCases.research.saveError": "Save failed"
+  "investmentCases.research.saveError": "Save failed",
+  "investmentCases.operations.quantity": "Quantity",
+  "investmentCases.operations.price": "Price"
 }
