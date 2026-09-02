@@ -7,9 +7,10 @@
 
 use axum::{
     extract::{Path, State},
-    routing::{get, post},
+    routing::{get, patch, post},
     Extension, Json, Router,
 };
+use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -25,6 +26,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/investment-cases", post(ensure))
         .route("/api/investment-cases/{id}", get(get_one))
         .route("/api/investment-cases/{id}/live", get(live))
+        .route("/api/investment-cases/{id}/state", patch(update_state))
+        .route("/api/investment-cases/{id}/thesis", get(get_thesis).put(put_thesis))
         .route(
             "/api/investment-cases/{id}/decisions",
             get(list_decisions).post(add_decision),
@@ -121,9 +124,19 @@ async fn live(
 
 #[derive(Deserialize)]
 struct DecisionBody {
+    /// Action taken after this change (legacy wire name kept).
     decision_type: String,
+    /// Confidence AFTER the change (DB column `confidence`; new UI reads
+    /// `confidence_after` in responses — same value).
     #[serde(default = "default_confidence")]
     confidence: i16,
+    #[serde(default)]
+    what_happened: String,
+    #[serde(default)]
+    impact_direction: Option<String>,
+    #[serde(default)]
+    affected_assumption_id: Option<Uuid>,
+    // Legacy decision fields — deprecated, accepted for compatibility only.
     #[serde(default)]
     reason: String,
     #[serde(default)]
@@ -134,6 +147,19 @@ struct DecisionBody {
     invalidation: String,
     #[serde(default)]
     watch_items: String,
+}
+
+const IMPACT_DIRECTIONS: [&str; 3] = ["strengthen", "weaken", "neutral"];
+
+/// Serialize one record for the wire, exposing the same confidence under its
+/// new semantic name too (DB column keeps the legacy name).
+fn decision_json(d: &investment_cases::DecisionRecord) -> Value {
+    let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        let conf = o.get("confidence").cloned().unwrap_or(Value::Null);
+        o.insert("confidence_after".to_string(), conf);
+    }
+    v
 }
 fn default_confidence() -> i16 {
     3
@@ -159,14 +185,24 @@ async fn add_decision(
     if !(1..=5).contains(&body.confidence) {
         return Err(ApiError::bad_request("confidence must be between 1 and 5"));
     }
+    if let Some(dir) = &body.impact_direction {
+        if !IMPACT_DIRECTIONS.contains(&dir.as_str()) {
+            return Err(ApiError::bad_request(
+                "impact_direction must be one of strengthen|weaken|neutral",
+            ));
+        }
+    }
 
     let pos = investment_cases::instrument_position(&state.pool, &case).await?;
-    let decision = investment_cases::create_decision(
+    let decision = investment_cases::record_change(
         &state.pool,
         &case,
-        &investment_cases::NewDecision {
+        &investment_cases::NewChange {
             decision_type: &body.decision_type,
             confidence: body.confidence,
+            what_happened: &body.what_happened,
+            impact_direction: body.impact_direction.as_deref(),
+            affected_assumption_id: body.affected_assumption_id,
             reason: &body.reason,
             evidence: &body.evidence,
             counter_evidence: &body.counter_evidence,
@@ -176,7 +212,7 @@ async fn add_decision(
         &pos,
     )
     .await?;
-    Ok(Json(json!({ "decision": decision })))
+    Ok(Json(json!({ "decision": decision_json(&decision) })))
 }
 
 /// GET /api/investment-cases/{id}/decisions — decision timeline.
@@ -188,7 +224,125 @@ async fn list_decisions(
     let user_id = user.id;
     let case = owned_case(&state.pool, id, user_id).await?;
     let decisions = investment_cases::list_decisions(&state.pool, case.id).await?;
-    Ok(Json(json!({ "decisions": decisions })))
+    let out: Vec<Value> = decisions.iter().map(decision_json).collect();
+    Ok(Json(json!({ "decisions": out })))
+}
+
+#[derive(Deserialize)]
+struct StateBody {
+    #[serde(default)]
+    valuation_view: Option<String>,
+    #[serde(default)]
+    current_biggest_question: Option<String>,
+    // current_action / current_confidence are NOT accepted here: they only
+    // change through POST /decisions (record_change) — see the store docs.
+    #[serde(default)]
+    #[allow(dead_code)]
+    current_action: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    current_confidence: Option<i16>,
+}
+
+const VALUATION_VIEWS: [&str; 4] = ["cheap", "fair", "expensive", "unclear"];
+
+/// PATCH /api/investment-cases/{id}/state — standalone-autosaved current-state
+/// fields only (valuation view / biggest question).
+async fn update_state(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<StateBody>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = owned_case(&state.pool, id, user.id).await?;
+    if body.current_action.is_some() || body.current_confidence.is_some() {
+        return Err(ApiError::bad_request(
+            "current_action/current_confidence only change by recording a change (POST decisions)",
+        ));
+    }
+    if let Some(v) = &body.valuation_view {
+        if !VALUATION_VIEWS.contains(&v.as_str()) {
+            return Err(ApiError::bad_request(
+                "valuation_view must be one of cheap|fair|expensive|unclear",
+            ));
+        }
+    }
+    investment_cases::update_current_state(
+        &state.pool,
+        id,
+        body.valuation_view.as_deref(),
+        body.current_biggest_question.as_deref(),
+    )
+    .await?;
+    let case = owned_case(&state.pool, id, user.id).await?;
+    Ok(Json(json!({ "case": case })))
+}
+
+/// GET /api/investment-cases/{id}/thesis — lazy: null when never saved.
+async fn get_thesis(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = owned_case(&state.pool, id, user.id).await?;
+    let thesis = investment_cases::get_thesis(&state.pool, id).await?;
+    match thesis {
+        Some((t, assumptions)) => Ok(Json(json!({ "thesis": t, "assumptions": assumptions }))),
+        None => Ok(Json(json!({ "thesis": null, "assumptions": [] }))),
+    }
+}
+
+#[derive(Deserialize)]
+struct ThesisAssumptionBody {
+    position: i16,
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct ThesisBody {
+    #[serde(default)]
+    core_thesis: String,
+    #[serde(default)]
+    invalidation: String,
+    #[serde(default)]
+    major_risks: String,
+    #[serde(default)]
+    assumptions: Vec<ThesisAssumptionBody>,
+}
+
+/// PUT /api/investment-cases/{id}/thesis — upsert (lazy create on first save).
+async fn put_thesis(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ThesisBody>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = owned_case(&state.pool, id, user.id).await?;
+    let mut seen = std::collections::HashSet::new();
+    let mut assumptions: Vec<(i16, String)> = Vec::new();
+    for a in &body.assumptions {
+        if !(1..=3).contains(&a.position) {
+            return Err(ApiError::bad_request("assumption position must be 1..=3"));
+        }
+        if !seen.insert(a.position) {
+            return Err(ApiError::bad_request("duplicate assumption position"));
+        }
+        assumptions.push((a.position, a.text.trim().to_string()));
+    }
+    investment_cases::upsert_thesis(
+        &state.pool,
+        id,
+        &body.core_thesis,
+        &body.invalidation,
+        &body.major_risks,
+        &assumptions,
+    )
+    .await?;
+    let thesis = investment_cases::get_thesis(&state.pool, id)
+        .await?
+        .context("thesis missing right after save")?;
+    let (t, a) = thesis;
+    Ok(Json(json!({ "thesis": t, "assumptions": a })))
 }
 
 #[cfg(test)]

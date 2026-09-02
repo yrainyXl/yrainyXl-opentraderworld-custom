@@ -44,6 +44,13 @@ pub struct InvestmentCase {
     pub currency: String,
     pub asset_class: String,
     pub document_id: Uuid,
+    /// Projection of the LATEST change record — only updated transactionally
+    /// by `record_change`, never edited standalone.
+    pub current_action: Option<String>,
+    pub current_confidence: Option<i16>,
+    /// Standalone-autosaved current-state fields.
+    pub valuation_view: Option<String>,
+    pub current_biggest_question: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -52,8 +59,20 @@ pub struct InvestmentCase {
 pub struct DecisionRecord {
     pub id: Uuid,
     pub investment_case_id: Uuid,
+    /// Action taken after this change (legacy name kept on the wire as well).
     pub decision_type: String,
+    /// RE-DEFINED as confidence AFTER the change (DB column name kept — no rename).
     pub confidence: i16,
+    /// Confidence before the change, copied from current state at record time.
+    pub confidence_before: Option<i16>,
+    /// The one required high-frequency field ("what changed since last time").
+    pub what_happened: String,
+    pub impact_direction: Option<String>,
+    pub affected_assumption_id: Option<Uuid>,
+    /// Text SNAPSHOT of the assumption at record time — later thesis edits must
+    /// not rewrite history.
+    pub affected_assumption_text: String,
+    /// Legacy decision fields (deprecated for new records, kept for old ones).
     pub reason: String,
     pub evidence: String,
     pub counter_evidence: String,
@@ -137,7 +156,7 @@ mod date_fmt {
 macro_rules! case_select {
     ($($rest:tt)*) => {
         sqlx::query_as::<_, InvestmentCase>(concat!(
-            "SELECT id, user_id, provider, provider_id, symbol, name, exchange, currency, asset_class, document_id, created_at FROM investment_cases ",
+            "SELECT id, user_id, provider, provider_id, symbol, name, exchange, currency, asset_class, document_id, current_action, current_confidence, valuation_view, current_biggest_question, created_at FROM investment_cases ",
             $($rest)*
         ))
     };
@@ -388,13 +407,20 @@ pub async fn instrument_position(
     })
 }
 
-// ── Decisions ────────────────────────────────────────────────────────────────
+// ── Change Records (the high-frequency interaction) ─────────────────────────
 
-/// User-supplied decision fields (snapshot numbers are NEVER accepted from the
-/// client — they are computed server-side by [`instrument_position`]).
-pub struct NewDecision<'a> {
+/// User-supplied change-record fields. Snapshot numbers are NEVER accepted from
+/// the client — they are computed server-side by [`instrument_position`].
+/// `what_happened` is the only required high-frequency field; the legacy
+/// decision text fields stay accepted (deprecated) for backward compatibility.
+pub struct NewChange<'a> {
+    /// Action taken after this change (observe/hold/buy/add/reduce/exit).
     pub decision_type: &'a str,
+    /// Confidence AFTER the change (DB column `confidence`).
     pub confidence: i16,
+    pub what_happened: &'a str,
+    pub impact_direction: Option<&'a str>,
+    pub affected_assumption_id: Option<Uuid>,
     pub reason: &'a str,
     pub evidence: &'a str,
     pub counter_evidence: &'a str,
@@ -402,17 +428,57 @@ pub struct NewDecision<'a> {
     pub watch_items: &'a str,
 }
 
-/// Insert a decision with a frozen server-computed snapshot. There is no UPDATE
-/// function for decision records: snapshots never change after creation.
-pub async fn create_decision(
+/// Record a change ATOMICALLY:
+///
+/// 1. lock the case row and read the CURRENT confidence;
+/// 2. create the immutable change record — `confidence_before` = current
+///    confidence, `affected_assumption_text` = snapshot of the assumption's
+///    text at this moment (later thesis edits never rewrite history);
+/// 3. project the new state: `current_action` / `current_confidence` are
+///    updated in the SAME transaction (Change Log = history; Current State =
+///    projection of the latest record);
+/// 4. commit.
+///
+/// There is no UPDATE path for change records: snapshots never change.
+pub async fn record_change(
     pool: &PgPool,
     case: &InvestmentCase,
-    input: &NewDecision<'_>,
+    input: &NewChange<'_>,
     pos: &InstrumentPosition,
 ) -> anyhow::Result<DecisionRecord> {
-    Ok(sqlx::query_as(
+    let mut tx = pool.begin().await?;
+
+    // Lock the case row; read the current confidence projection.
+    let (current_confidence,): (Option<i16>,) = sqlx::query_as(
+        "SELECT current_confidence FROM investment_cases WHERE id = $1 FOR UPDATE",
+    )
+    .bind(case.id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Snapshot the assumption text if one is referenced (missing row → no link).
+    let mut affected_text = String::new();
+    if let Some(aid) = input.affected_assumption_id {
+        let found: Option<(String,)> =
+            sqlx::query_as("SELECT text FROM thesis_assumptions WHERE id = $1")
+                .bind(aid)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((text,)) = found {
+            affected_text = text;
+        }
+    }
+    let affected_id = if affected_text.is_empty() {
+        None
+    } else {
+        input.affected_assumption_id
+    };
+
+    let record = sqlx::query_as(
         "INSERT INTO decision_records (
-            id, investment_case_id, decision_type, confidence,
+            id, investment_case_id, decision_type, confidence, confidence_before,
+            what_happened, impact_direction,
+            affected_assumption_id, affected_assumption_text,
             reason, evidence, counter_evidence, invalidation, watch_items,
             recorded_at,
             snapshot_provider, snapshot_provider_id, snapshot_symbol, snapshot_name,
@@ -421,8 +487,9 @@ pub async fn create_decision(
             snapshot_quantity, snapshot_avg_cost, snapshot_cost_basis,
             snapshot_market_value, snapshot_unrealized_pnl, snapshot_unrealized_pct
          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
          )
          RETURNING *",
     )
@@ -430,6 +497,11 @@ pub async fn create_decision(
     .bind(case.id)
     .bind(input.decision_type)
     .bind(input.confidence)
+    .bind(current_confidence)
+    .bind(input.what_happened)
+    .bind(input.impact_direction)
+    .bind(affected_id)
+    .bind(affected_text)
     .bind(input.reason)
     .bind(input.evidence)
     .bind(input.counter_evidence)
@@ -450,9 +522,151 @@ pub async fn create_decision(
     .bind(pos.market_value)
     .bind(pos.unrealized_pnl)
     .bind(pos.unrealized_pct)
-    .fetch_one(pool)
-    .await?)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Project the new current state in the same transaction.
+    sqlx::query("UPDATE investment_cases SET current_action = $2, current_confidence = $3 WHERE id = $1")
+        .bind(case.id)
+        .bind(input.decision_type)
+        .bind(input.confidence)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(record)
 }
+
+/// Standalone-autosaved current-state fields (valuation view / biggest
+/// question). `current_action` and `current_confidence` are deliberately NOT
+/// settable here — they only change via [`record_change`].
+pub async fn update_current_state(
+    pool: &PgPool,
+    case_id: Uuid,
+    valuation_view: Option<&str>,
+    current_biggest_question: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE investment_cases SET valuation_view = $2, current_biggest_question = $3 WHERE id = $1",
+    )
+    .bind(case_id)
+    .bind(valuation_view)
+    .bind(current_biggest_question.unwrap_or(""))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Thesis (low frequency) ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Thesis {
+    pub id: Uuid,
+    pub investment_case_id: Uuid,
+    pub core_thesis: String,
+    pub invalidation: String,
+    pub major_risks: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ThesisAssumption {
+    pub id: Uuid,
+    pub investment_case_id: Uuid,
+    pub position: i16,
+    pub text: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// Read the thesis + its assumptions. LAZY: returns None when the user has
+/// never saved a thesis — reads never create rows.
+pub async fn get_thesis(
+    pool: &PgPool,
+    case_id: Uuid,
+) -> anyhow::Result<Option<(Thesis, Vec<ThesisAssumption>)>> {
+    let thesis: Option<Thesis> =
+        sqlx::query_as("SELECT * FROM investment_theses WHERE investment_case_id = $1")
+            .bind(case_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(thesis) = thesis else { return Ok(None) };
+    let assumptions: Vec<ThesisAssumption> = sqlx::query_as(
+        "SELECT * FROM thesis_assumptions WHERE investment_case_id = $1 ORDER BY position",
+    )
+    .bind(case_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(Some((thesis, assumptions)))
+}
+
+/// Save the thesis (UPSERT — first save creates the row, later saves update it)
+/// and sync its assumptions in one transaction. Assumptions are matched by
+/// (case, position): text edits keep the row id (Change Record links stay
+/// valid); positions absent from the payload are deleted (their links fall to
+/// ON DELETE SET NULL — history text snapshots survive).
+pub async fn upsert_thesis(
+    pool: &PgPool,
+    case_id: Uuid,
+    core_thesis: &str,
+    invalidation: &str,
+    major_risks: &str,
+    assumptions: &[(i16, String)],
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO investment_theses (id, investment_case_id, core_thesis, invalidation, major_risks)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (investment_case_id) DO UPDATE
+         SET core_thesis = EXCLUDED.core_thesis,
+             invalidation = EXCLUDED.invalidation,
+             major_risks = EXCLUDED.major_risks,
+             updated_at = now()",
+    )
+    .bind(Uuid::new_v4())
+    .bind(case_id)
+    .bind(core_thesis)
+    .bind(invalidation)
+    .bind(major_risks)
+    .execute(&mut *tx)
+    .await?;
+
+    // Positions present in the payload: upsert (keep existing id via the
+    // (case_id, position) unique key so change-record links survive edits).
+    for (position, text) in assumptions {
+        sqlx::query(
+            "INSERT INTO thesis_assumptions (id, investment_case_id, position, text)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (investment_case_id, position) DO UPDATE
+             SET text = EXCLUDED.text, updated_at = now()",
+        )
+        .bind(Uuid::new_v4())
+        .bind(case_id)
+        .bind(position)
+        .bind(text)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Positions no longer present: delete (FK ON DELETE SET NULL on records).
+    sqlx::query(
+        "DELETE FROM thesis_assumptions WHERE investment_case_id = $1 AND NOT (position = ANY($2))",
+    )
+    .bind(case_id)
+    .bind(&assumptions.iter().map(|(p, _)| *p).collect::<Vec<i16>>())
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+
 
 pub async fn list_decisions(pool: &PgPool, case_id: Uuid) -> anyhow::Result<Vec<DecisionRecord>> {
     Ok(sqlx::query_as(

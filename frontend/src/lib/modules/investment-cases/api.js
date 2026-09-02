@@ -41,7 +41,19 @@ export const investmentCasesApi = {
     req(`/investment-cases/${id}/decisions`, {
       method: 'POST',
       body: JSON.stringify(body)
-    }).then((r) => r.decision)
+    }).then((r) => r.decision),
+  /** Standalone-autosaved current state (valuation view / biggest question only). */
+  patchState: (id, body) =>
+    req(`/investment-cases/${id}/state`, {
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    }).then((r) => r.case),
+  getThesis: (id) => req(`/investment-cases/${id}/thesis`),
+  putThesis: (id, body) =>
+    req(`/investment-cases/${id}/thesis`, {
+      method: 'PUT',
+      body: JSON.stringify(body)
+    }).then((r) => ({ thesis: r.thesis, assumptions: r.assumptions }))
 };
 
 export { fmtMoney, fmtSignedMoney, fmtPct } from '$lib/format.js';
