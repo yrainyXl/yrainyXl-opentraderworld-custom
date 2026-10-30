@@ -285,7 +285,7 @@ pub async fn stock_quote(ticker: &str) -> Result<Option<(f64, String)>> {
 /// an unconvertible quote is left unpriced (→ unresolved) rather than stored as if it
 /// were dollars, which is what made a EUR-listed holding read 17% rich against a cost
 /// basis that *was* converted.
-async fn stock_price_usd(pool: &PgPool, ticker: &str) -> Result<Option<f64>> {
+pub(crate) async fn stock_price_usd(pool: &PgPool, ticker: &str) -> Result<Option<f64>> {
     let Some((price, currency)) = stock_quote(ticker).await? else {
         return Ok(None);
     };
@@ -352,7 +352,7 @@ async fn china_quote(ticker: &str) -> Result<Option<(f64, String)>> {
 
 /// A China A-share quote (CNY) converted to USD with the journal's FX rates — the same
 /// treatment a non-USD Yahoo listing gets. `None` when there is no price or no CNY rate.
-async fn china_price_usd(pool: &PgPool, ticker: &str) -> Result<Option<f64>> {
+pub(crate) async fn china_price_usd(pool: &PgPool, ticker: &str) -> Result<Option<f64>> {
     let Some((price, _ccy)) = china_quote(ticker).await? else {
         return Ok(None);
     };

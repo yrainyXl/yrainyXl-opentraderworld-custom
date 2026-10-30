@@ -119,6 +119,10 @@ const MODULES: &[ModuleTables] = &[
         name: "Watchlists",
         tables: &["watchlist_items", "watchlists"],
     },
+    // Research (Investment Case). `investment_cases` TRUNCATE cascades to its
+    // decision/change records, thesis and assumptions, so listing only the
+    // parent table is enough for a wipe.
+    ModuleTables { id: "investment-cases", name: "Research", tables: &["investment_cases"] },
     ModuleTables {
         id: "taxcalc",
         name: "Tax Calculator",
@@ -353,4 +357,23 @@ pub async fn detach_module(pool: &PgPool, id: &str, wipe: bool) -> anyhow::Resul
         wipe_module(pool, id).await?;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_module_ids_include_research_and_are_unique() {
+        // Research (investment-cases) is a first-class module: it must be known so
+        // the default-on installed set (and thus the frontend route guard) allows
+        // /investment-cases and /investment-cases/{id}.
+        let ids = known_module_ids();
+        assert!(
+            ids.iter().any(|i| i == "investment-cases"),
+            "known module ids should include investment-cases"
+        );
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "known module ids must be unique");
+    }
 }

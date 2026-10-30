@@ -42,6 +42,33 @@ pub struct Document {
     pub updated_at: OffsetDateTime,
 }
 
+/// Fetch one document's metadata (no content) on a connection — usable inside
+/// caller transactions via `&mut *tx`.
+pub async fn get_meta(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> anyhow::Result<Option<DocumentMeta>> {
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, String, f64, Option<String>, Option<String>, OffsetDateTime)>(
+        "SELECT id, parent_id, kind, title, position, icon, flag, updated_at \
+         FROM documents WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(
+        |(id, parent_id, kind, title, position, icon, flag, updated_at)| DocumentMeta {
+            id,
+            parent_id,
+            kind,
+            title,
+            position,
+            icon,
+            flag,
+            updated_at,
+        },
+    ))
+}
+
 /// List the whole tree (metadata only), ordered for stable rendering.
 pub async fn list_tree(pool: &PgPool) -> anyhow::Result<Vec<DocumentMeta>> {
     let rows = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, String, f64, Option<String>, Option<String>, OffsetDateTime)>(

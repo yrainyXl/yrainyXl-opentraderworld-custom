@@ -1,5 +1,5 @@
 <script>
-  import { moduleById } from '$lib/modules/registry';
+  import { moduleById, moduleLabel } from '$lib/modules/registry';
   import { installedIds } from '$lib/modules/installed.js';
   import { dashboardApi } from '$lib/modules/dashboard/api.js';
   import {
@@ -382,7 +382,7 @@
                         href={editing ? undefined : mod.base}
                       >
                         <span class="tile-icon"><Icon name={mod.icon} size={17} strokeWidth={1.8} /></span>
-                        <span class="tile-name">{mod.name}</span>
+                        <span class="tile-name">{moduleLabel(mod, $t)}</span>
                         {#if mod.descKey}<span class="tile-desc">{$t(mod.descKey)}</span>{/if}
                       </svelte:element>
                     {/if}

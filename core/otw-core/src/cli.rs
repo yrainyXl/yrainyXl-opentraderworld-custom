@@ -23,9 +23,16 @@
 //!
 //! Encrypted data is unaffected: the vault and every stored provider secret are sealed with
 //! `OTW_SECRET_KEY`, never with the login password, so a reset loses nothing.
+//!
+//! The same argv-only rule covers external-agent API tokens: `create-agent-token` prints a
+//! freshly minted bearer value once to this terminal and stores only its SHA-256. Nothing
+//! about a token is accepted from argv, so a token never lands in shell history or `ps`;
+//! `list-agent-tokens` and `revoke-agent-token` operate on ids/prefixes only.
 
 use anyhow::Context;
 use sqlx::PgPool;
+use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
+use uuid::Uuid;
 
 use crate::auth;
 
@@ -43,6 +50,15 @@ const MIN_PASSWORD_LEN: usize = 8;
 pub enum Command {
     ResetPassword { username: String, from_stdin: bool },
     ListUsers,
+    CreateAgentToken {
+        username: String,
+        agent: String,
+        name: String,
+        scopes: Vec<String>,
+        expires_in_days: Option<i64>,
+    },
+    ListAgentTokens { username: String },
+    RevokeAgentToken { id: Uuid },
 }
 
 /// Read a command off argv, or `None` when this is an ordinary server start.
@@ -70,7 +86,107 @@ pub fn from_args() -> Option<Command> {
             }
         }
         "list-users" => Some(Command::ListUsers),
+        "create-agent-token" => parse_create_agent_token(args),
+        "list-agent-tokens" => parse_list_agent_tokens(args),
+        "revoke-agent-token" => parse_revoke_agent_token(args),
         _ => None,
+    }
+}
+
+/// Read the value following a flag. A missing value or another flag is a usage error.
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
+    match args.next() {
+        Some(v) if !v.starts_with('-') => v,
+        Some(v) => usage(&format!("{flag} needs a value, got `{v}`")),
+        None => usage(&format!("{flag} needs a value")),
+    }
+}
+
+fn parse_create_agent_token(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    let mut username: Option<String> = None;
+    let mut agent: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut scopes: Vec<String> = Vec::new();
+    let mut expires_in_days: Option<i64> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--agent" => agent = Some(next_value(&mut args, "--agent")),
+            "--name" => name = Some(next_value(&mut args, "--name")),
+            "--scope" => scopes.push(next_value(&mut args, "--scope")),
+            "--expires-in-days" => {
+                let raw = next_value(&mut args, "--expires-in-days");
+                let days = raw
+                    .parse::<i64>()
+                    .unwrap_or_else(|_| usage("--expires-in-days must be an integer"));
+                expires_in_days = Some(days);
+            }
+            other if other.starts_with('-') => {
+                usage(&format!("unknown option `{other}`"))
+            }
+            other if username.is_some() => {
+                usage(&format!("unexpected argument `{other}`"))
+            }
+            other => username = Some(other.to_string()),
+        }
+    }
+
+    let username = username.unwrap_or_else(|| usage("create-agent-token needs a username"));
+    let agent = agent.unwrap_or_else(|| usage("create-agent-token needs --agent <name>"));
+
+    if scopes.is_empty() {
+        scopes.push(otw_store::agent_api_tokens::SCOPE_AGENT_PING.to_string());
+    }
+    for scope in &scopes {
+        if !otw_store::agent_api_tokens::SUPPORTED_SCOPES.contains(&scope.as_str()) {
+            usage(&format!(
+                "unsupported scope `{scope}` (supported: {})",
+                otw_store::agent_api_tokens::SUPPORTED_SCOPES.join(", ")
+            ));
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+
+    let name = name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{agent} agent token"));
+
+    Some(Command::CreateAgentToken {
+        username,
+        agent,
+        name,
+        scopes,
+        expires_in_days,
+    })
+}
+
+fn parse_list_agent_tokens(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    match args.next() {
+        Some(username) if !username.starts_with('-') => {
+            if let Some(extra) = args.next() {
+                usage(&format!("unexpected argument `{extra}`"));
+            }
+            Some(Command::ListAgentTokens { username })
+        }
+        Some(other) => usage(&format!("unexpected argument `{other}`")),
+        None => usage("list-agent-tokens needs a username"),
+    }
+}
+
+fn parse_revoke_agent_token(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    match args.next() {
+        Some(raw) if !raw.starts_with('-') => {
+            let id = Uuid::parse_str(&raw)
+                .unwrap_or_else(|_| usage("revoke-agent-token needs a token id (UUID)"));
+            if let Some(extra) = args.next() {
+                usage(&format!("unexpected argument `{extra}`"));
+            }
+            Some(Command::RevokeAgentToken { id })
+        }
+        Some(other) => usage(&format!("unexpected argument `{other}`")),
+        None => usage("revoke-agent-token needs a token id"),
     }
 }
 
@@ -81,6 +197,14 @@ fn usage(problem: &str) -> ! {
     eprintln!("  reset-password <username>           set a printed one-time password");
     eprintln!("  reset-password <username> --stdin   read the new password from stdin instead");
     eprintln!("  list-users                          print the account names");
+    eprintln!();
+    eprintln!("External AI agent API tokens (run on the host; the bearer value is printed ONCE and never stored):");
+    eprintln!("  create-agent-token <username> --agent <name> [--name <label>]");
+    eprintln!("      [--scope <scope>] [--expires-in-days <n>]");
+    eprintln!("      supported scopes: {}", otw_store::agent_api_tokens::SUPPORTED_SCOPES.join(", "));
+    eprintln!("      default scope: agent:ping; --expires-in-days 0 = never expires");
+    eprintln!("  list-agent-tokens <username>        list token metadata (never the token)");
+    eprintln!("  revoke-agent-token <id>             revoke one token by id");
     std::process::exit(2);
 }
 
@@ -97,6 +221,17 @@ pub async fn run(cmd: Command, database_url: &str) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::CreateAgentToken {
+            username,
+            agent,
+            name,
+            scopes,
+            expires_in_days,
+        } => {
+            create_agent_token(&pool, &username, &agent, &name, &scopes, expires_in_days).await
+        }
+        Command::ListAgentTokens { username } => list_agent_tokens(&pool, &username).await,
+        Command::RevokeAgentToken { id } => revoke_agent_token(&pool, id).await,
     }
 }
 
@@ -151,6 +286,163 @@ async fn reset_password(pool: &PgPool, username: &str, from_stdin: bool) -> anyh
     }
     println!("Sign in with it once; the app then asks for a password of your own.");
     println!("Every existing session was revoked.");
+    Ok(())
+}
+
+/// Turn "valid for N days" into an absolute instant. `None`/`Some(0)` = no expiry.
+/// The ten-year ceiling is a guard against a fat-fingered figure, not a security boundary.
+fn expiry_from_days(days: Option<i64>) -> anyhow::Result<Option<OffsetDateTime>> {
+    match days {
+        None | Some(0) => Ok(None),
+        Some(n) if (1..=3650).contains(&n) => {
+            Ok(Some(OffsetDateTime::now_utc() + Duration::days(n)))
+        }
+        Some(_) => anyhow::bail!("--expires-in-days must be between 0 and 3650"),
+    }
+}
+
+fn fmt_time(t: OffsetDateTime) -> String {
+    t.format(&Rfc3339).unwrap_or_else(|_| t.unix_timestamp().to_string())
+}
+
+fn fmt_opt_time(t: Option<OffsetDateTime>) -> String {
+    t.map(fmt_time).unwrap_or_else(|| "never".to_string())
+}
+
+async fn create_agent_token(
+    pool: &PgPool,
+    username: &str,
+    agent: &str,
+    name: &str,
+    scopes: &[String],
+    expires_in_days: Option<i64>,
+) -> anyhow::Result<()> {
+    let agent = agent.trim();
+    if agent.is_empty()
+        || agent.len() > 64
+        || !agent
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        anyhow::bail!(
+            "--agent must be 1-64 characters of A-Z, a-z, 0-9, '.', '_' or '-'"
+        );
+    }
+    let name = name.trim();
+    if name.is_empty() || name.len() > 200 {
+        anyhow::bail!("--name must be 1-200 characters");
+    }
+    if scopes.is_empty() {
+        anyhow::bail!("at least one --scope is required");
+    }
+
+    let user = otw_store::find_user_by_username(pool, username.trim())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no account named `{username}`"))?;
+
+    let expires_at = expiry_from_days(expires_in_days)?;
+    let (row, token) = otw_store::agent_api_tokens::create_token(
+        pool,
+        user.id,
+        agent,
+        name,
+        scopes,
+        expires_at,
+    )
+    .await?;
+
+    // Audit trail: records the existence and metadata of the credential, never the
+    // bearer value. Written directly because this process exits right after.
+    if let Err(e) = otw_store::logs::insert(
+        pool,
+        "info",
+        "otw_core::cli",
+        &format!(
+            "agent API token created for account '{}' (id {}, agent '{}', scopes [{}], expires {})",
+            user.username,
+            row.id,
+            row.agent,
+            row.scopes.join(", "),
+            fmt_opt_time(row.expires_at)
+        ),
+    )
+    .await
+    {
+        eprintln!("warning: the token was created but the audit log entry failed: {e:#}");
+    }
+
+    println!("Agent API token created for account '{}'.", user.username);
+    println!("  id:      {}", row.id);
+    println!("  agent:   {}", row.agent);
+    println!("  prefix:  {}", row.prefix);
+    println!("  scopes:  {}", row.scopes.join(", "));
+    println!("  expires: {}", fmt_opt_time(row.expires_at));
+    println!();
+    println!("  token:   {token}");
+    println!();
+    println!("Store it now: it is shown only once, and only its SHA-256 is stored.");
+    println!("Send it as `Authorization: Bearer <token>` to /api/agent/ping.");
+    Ok(())
+}
+
+async fn list_agent_tokens(pool: &PgPool, username: &str) -> anyhow::Result<()> {
+    let user = otw_store::find_user_by_username(pool, username.trim())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no account named `{username}`"))?;
+    let tokens = otw_store::agent_api_tokens::list_for_user(pool, user.id).await?;
+
+    if tokens.is_empty() {
+        println!("No agent API tokens for '{}'.", user.username);
+        return Ok(());
+    }
+    println!("Agent API tokens for '{}':", user.username);
+    for t in tokens {
+        let status = if t.is_revoked() {
+            "revoked"
+        } else if t.is_expired() {
+            "expired"
+        } else {
+            "active"
+        };
+        println!(
+            "  {}  prefix={}  agent={}  name={}  scopes=[{}]  created={}  expires={}  status={}",
+            t.id,
+            t.prefix,
+            t.agent,
+            t.name,
+            t.scopes.join(", "),
+            fmt_time(t.created_at),
+            fmt_opt_time(t.expires_at),
+            status
+        );
+    }
+    Ok(())
+}
+
+async fn revoke_agent_token(pool: &PgPool, id: Uuid) -> anyhow::Result<()> {
+    let row = otw_store::agent_api_tokens::revoke(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no agent API token with id `{id}`"))?;
+
+    if let Err(e) = otw_store::logs::insert(
+        pool,
+        "warn",
+        "otw_core::cli",
+        &format!(
+            "agent API token revoked from the host CLI (id {}, agent '{}', prefix {})",
+            row.id, row.agent, row.prefix
+        ),
+    )
+    .await
+    {
+        eprintln!("warning: the token was revoked but the audit log entry failed: {e:#}");
+    }
+
+    println!(
+        "Revoked agent API token {} (agent '{}', prefix {}).",
+        row.id, row.agent, row.prefix
+    );
+    println!("Any further request with it will be rejected with 401.");
     Ok(())
 }
 

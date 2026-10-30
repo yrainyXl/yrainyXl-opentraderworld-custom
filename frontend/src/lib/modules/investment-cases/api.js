@@ -27,6 +27,8 @@ async function req(path, options = {}) {
 }
 
 export const investmentCasesApi = {
+  /** The user's existing investment cases (most recently changed first). */
+  list: () => req('/investment-cases').then((r) => r.cases),
   /** Ensure a case exists for the instrument behind this portfolio asset. */
   ensure: (portfolioAssetId) =>
     req('/investment-cases', {
@@ -35,6 +37,13 @@ export const investmentCasesApi = {
     }).then((r) => r.case),
   get: (id) => req(`/investment-cases/${id}`).then((r) => r.case),
   live: (id) => req(`/investment-cases/${id}/live`),
+  /** Return the case's research page metadata, creating a fresh empty page
+   *  (under the research folder) and relinking when the page was deleted from
+   *  the Editor. The case and its decision/change records are never touched. */
+  ensureResearchDocument: (id) =>
+    req(`/investment-cases/${id}/research-document`, { method: 'POST' }).then(
+      (r) => r.document
+    ),
   decisions: (id) =>
     req(`/investment-cases/${id}/decisions`).then((r) => r.decisions),
   addDecision: (id, body) =>
@@ -42,12 +51,6 @@ export const investmentCasesApi = {
       method: 'POST',
       body: JSON.stringify(body)
     }).then((r) => r.decision),
-  /** Standalone-autosaved current state (valuation view / biggest question only). */
-  patchState: (id, body) =>
-    req(`/investment-cases/${id}/state`, {
-      method: 'PATCH',
-      body: JSON.stringify(body)
-    }).then((r) => r.case),
   getThesis: (id) => req(`/investment-cases/${id}/thesis`),
   putThesis: (id, body) =>
     req(`/investment-cases/${id}/thesis`, {

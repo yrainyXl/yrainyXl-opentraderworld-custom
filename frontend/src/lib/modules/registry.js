@@ -170,6 +170,14 @@ export const modules = [
     descKey: 'module.watchlists.desc'
   },
   {
+    id: 'investment-cases',
+    name: 'Research',
+    icon: 'target',
+    base: '/investment-cases',
+    nameKey: 'module.investment-cases.name',
+    descKey: 'module.investment-cases.desc'
+  },
+  {
     id: 'taxcalc',
     name: 'Tax Calculator',
     icon: 'receipt',
@@ -250,6 +258,15 @@ export function moduleForPath(pathname) {
 
 export function moduleById(id) {
   return modules.find((m) => m.id === id);
+}
+
+/**
+ * The module's display label in the active UI language. Modules that carry a
+ * `nameKey` localize their nav/tile name (e.g. 研究 vs Research); the rest keep
+ * their canonical English `name`. `tr` is the i18n `t` function.
+ */
+export function moduleLabel(m, tr) {
+  return m && m.nameKey ? tr(m.nameKey) : m?.name ?? '';
 }
 
 /** Feature modules (everything except the always-on home/dashboard). */

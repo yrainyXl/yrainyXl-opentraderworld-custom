@@ -7,7 +7,7 @@
 
 use axum::{
     extract::{Path, State},
-    routing::{get, patch, post},
+    routing::{get, post},
     Extension, Json, Router,
 };
 use anyhow::Context;
@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::market;
 use crate::{ApiError, AppState};
 use otw_store::investment_cases;
 use otw_store::User;
@@ -23,11 +24,11 @@ const DECISION_TYPES: [&str; 6] = ["observe", "hold", "buy", "add", "reduce", "e
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/investment-cases", post(ensure))
+        .route("/api/investment-cases", get(list).post(ensure))
         .route("/api/investment-cases/{id}", get(get_one))
         .route("/api/investment-cases/{id}/live", get(live))
-        .route("/api/investment-cases/{id}/state", patch(update_state))
         .route("/api/investment-cases/{id}/thesis", get(get_thesis).put(put_thesis))
+        .route("/api/investment-cases/{id}/research-document", post(ensure_document))
         .route(
             "/api/investment-cases/{id}/decisions",
             get(list_decisions).post(add_decision),
@@ -45,6 +46,18 @@ async fn owned_case(
         Some(c) if c.user_id == user_id => Ok(c),
         _ => Err(ApiError::not_found("investment case not found")),
     }
+}
+
+/// GET /api/investment-cases — the authenticated user's cases for the Research
+/// home list (most recently changed first). Live position/P&L intentionally NOT
+/// included: the list page reuses the per-case /live aggregation instead, so
+/// the Portfolio SSOT computation lives in exactly one place.
+async fn list(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> Result<Json<Value>, ApiError> {
+    let cases = investment_cases::list_cases_for_user(&state.pool, user.id).await?;
+    Ok(Json(json!({ "cases": cases })))
 }
 
 /// POST /api/investment-cases — ensure a case for the portfolio asset's
@@ -71,7 +84,8 @@ async fn ensure(
 }
 
 /// GET /api/investment-cases/{id} — the case (with its document_id; document
-/// content stays with the Editor API, which is the content SSOT).
+/// content stays with the Editor API, which is the content SSOT). document_id
+/// may be null when the research page was deleted from the Editor.
 async fn get_one(
     State(state): State<AppState>,
     Extension(user): Extension<User>,
@@ -82,6 +96,23 @@ async fn get_one(
     Ok(Json(json!({ "case": case })))
 }
 
+/// POST /api/investment-cases/{id}/research-document — return the case's
+/// research page metadata. When the page was deleted from the Editor
+/// (document_id NULL / stale), a fresh empty page is created under the
+/// “股票研究” folder and relinked. Creation happens on demand here (never as a
+/// GET side effect), so decisions/thesis/current state are never touched.
+async fn ensure_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let case = owned_case(&state.pool, id, user.id).await?;
+    let doc = investment_cases::ensure_research_document(&state.pool, case.id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("investment case not found"))?;
+    Ok(Json(json!({ "document": doc })))
+}
+
 /// GET /api/investment-cases/{id}/live — real-time aggregated position.
 async fn live(
     State(state): State<AppState>,
@@ -90,6 +121,9 @@ async fn live(
 ) -> Result<Json<Value>, ApiError> {
     let user_id = user.id;
     let case = owned_case(&state.pool, id, user_id).await?;
+    // /live must NOT depend on "the Portfolio was refreshed first": ensure the shared
+    // Market Quote for this instrument (refreshing it when stale) before aggregating.
+    market::ensure_identity(&state.pool, &case.provider, &case.provider_id).await?;
     let pos = investment_cases::instrument_position(&state.pool, &case).await?;
     // Serialize the position struct as a whole so its `#[serde(with = rfc3339)]`
     // attributes apply (field access would use OffsetDateTime's default format).
@@ -136,6 +170,12 @@ struct DecisionBody {
     impact_direction: Option<String>,
     #[serde(default)]
     affected_assumption_id: Option<Uuid>,
+    /// This round's valuation judgement (cheap/fair/expensive/unclear).
+    #[serde(default)]
+    valuation_view: Option<String>,
+    /// This round's biggest open question.
+    #[serde(default)]
+    biggest_question: String,
     // Legacy decision fields — deprecated, accepted for compatibility only.
     #[serde(default)]
     reason: String,
@@ -145,11 +185,13 @@ struct DecisionBody {
     counter_evidence: String,
     #[serde(default)]
     invalidation: String,
+    /// "What to watch next" for this round.
     #[serde(default)]
     watch_items: String,
 }
 
 const IMPACT_DIRECTIONS: [&str; 3] = ["strengthen", "weaken", "neutral"];
+const VALUATION_VIEWS: [&str; 4] = ["cheap", "fair", "expensive", "unclear"];
 
 /// Serialize one record for the wire, exposing the same confidence under its
 /// new semantic name too (DB column keeps the legacy name).
@@ -192,7 +234,17 @@ async fn add_decision(
             ));
         }
     }
+    if let Some(v) = &body.valuation_view {
+        if !VALUATION_VIEWS.contains(&v.as_str()) {
+            return Err(ApiError::bad_request(
+                "valuation_view must be one of cheap|fair|expensive|unclear",
+            ));
+        }
+    }
 
+    // Snapshot at the current shared Market Quote (refreshed when stale) so the frozen
+    // record starts from the same price the live view showed — not an older DB last price.
+    market::ensure_identity(&state.pool, &case.provider, &case.provider_id).await?;
     let pos = investment_cases::instrument_position(&state.pool, &case).await?;
     let decision = investment_cases::record_change(
         &state.pool,
@@ -203,6 +255,8 @@ async fn add_decision(
             what_happened: &body.what_happened,
             impact_direction: body.impact_direction.as_deref(),
             affected_assumption_id: body.affected_assumption_id,
+            valuation_view: body.valuation_view.as_deref(),
+            biggest_question: &body.biggest_question,
             reason: &body.reason,
             evidence: &body.evidence,
             counter_evidence: &body.counter_evidence,
@@ -226,56 +280,6 @@ async fn list_decisions(
     let decisions = investment_cases::list_decisions(&state.pool, case.id).await?;
     let out: Vec<Value> = decisions.iter().map(decision_json).collect();
     Ok(Json(json!({ "decisions": out })))
-}
-
-#[derive(Deserialize)]
-struct StateBody {
-    #[serde(default)]
-    valuation_view: Option<String>,
-    #[serde(default)]
-    current_biggest_question: Option<String>,
-    // current_action / current_confidence are NOT accepted here: they only
-    // change through POST /decisions (record_change) — see the store docs.
-    #[serde(default)]
-    #[allow(dead_code)]
-    current_action: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    current_confidence: Option<i16>,
-}
-
-const VALUATION_VIEWS: [&str; 4] = ["cheap", "fair", "expensive", "unclear"];
-
-/// PATCH /api/investment-cases/{id}/state — standalone-autosaved current-state
-/// fields only (valuation view / biggest question).
-async fn update_state(
-    State(state): State<AppState>,
-    Extension(user): Extension<User>,
-    Path(id): Path<Uuid>,
-    Json(body): Json<StateBody>,
-) -> Result<Json<Value>, ApiError> {
-    let _ = owned_case(&state.pool, id, user.id).await?;
-    if body.current_action.is_some() || body.current_confidence.is_some() {
-        return Err(ApiError::bad_request(
-            "current_action/current_confidence only change by recording a change (POST decisions)",
-        ));
-    }
-    if let Some(v) = &body.valuation_view {
-        if !VALUATION_VIEWS.contains(&v.as_str()) {
-            return Err(ApiError::bad_request(
-                "valuation_view must be one of cheap|fair|expensive|unclear",
-            ));
-        }
-    }
-    investment_cases::update_current_state(
-        &state.pool,
-        id,
-        body.valuation_view.as_deref(),
-        body.current_biggest_question.as_deref(),
-    )
-    .await?;
-    let case = owned_case(&state.pool, id, user.id).await?;
-    Ok(Json(json!({ "case": case })))
 }
 
 /// GET /api/investment-cases/{id}/thesis — lazy: null when never saved.

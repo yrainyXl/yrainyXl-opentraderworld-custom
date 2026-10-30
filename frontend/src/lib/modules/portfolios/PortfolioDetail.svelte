@@ -373,9 +373,11 @@
 <!-- A sortable column header. The clickable part is a real <button>, so the column
      is reachable by Tab and operable by Enter/Space; aria-sort announces the current
      direction. A bare onclick on the <th> looked identical and did neither.
-     `left` left-aligns text columns; numeric ones stay right-aligned via .num. -->
+     `left` left-aligns text columns; every other column is numeric and gets
+     `th.num` so the header lines up exactly over its right-aligned value cell
+     (table.tbl th defaults left — only th.num aligns right). -->
 {#snippet sortHeader(state, col, label, setState, left = false)}
-  <th class:l={left} aria-sort={ariaSort(state, col)}>
+  <th class:l={left} class:num={!left} aria-sort={ariaSort(state, col)}>
     <button class="sortable" onclick={() => setState(sortBy(state, col))}>
       {label}{arrow(state, col)}
     </button>
@@ -613,7 +615,7 @@
         <table class="tbl">
           <thead>
             <tr>
-              {@render sortHeader(assetSortState, 'symbol', $t('portfolios.detail.colSymbol'), setAssetSort, true)}
+              {@render sortHeader(assetSortState, 'symbol', $t('portfolios.detail.colSymbol'), setAssetSort)}
               {@render sortHeader(assetSortState, 'quantity', $t('portfolios.detail.colQty'), setAssetSort)}
               {@render sortHeader(assetSortState, 'avg_cost', $t('portfolios.detail.colAvgCost'), setAssetSort)}
               {@render sortHeader(assetSortState, 'price', $t('portfolios.detail.colPrice'), setAssetSort)}
@@ -627,7 +629,9 @@
           <tbody>
             {#each filteredAssets as a (a.id)}
               <tr class:cn={isChina(a)}>
-                <td class="l">
+                <!-- Code column right-aligns with its header; chips/name keep their
+                     relative order, just flushed to the same right edge. -->
+                <td class="code">
                   <span class="sym">{a.symbol}</span>
                   {#if a.recon_status === 'unresolved'}
                     <span class="rchip bad" title={$t('portfolios.detail.unresolvedHint')}>{$t('portfolios.reconcile.status.unresolved')}</span>
@@ -1226,6 +1230,14 @@
   }
   .l {
     text-align: left;
+  }
+  /* The asset code column right-aligns with its header (and the numeric columns
+     beside it); name/chips keep their inline order, just flush right. */
+  .code {
+    text-align: right;
+  }
+  .code .sym {
+    font-family: var(--mono);
   }
   tbody tr:hover {
     background: var(--surface-2);

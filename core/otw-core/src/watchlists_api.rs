@@ -15,12 +15,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::portfolios::prices;
 use crate::watchlists::{self, alerts, quotes};
 use crate::{ApiError, AppState};
 use otw_store::watchlist_alerts as alerts_store;
+use otw_store::watchlist_observations as obs_store;
 use otw_store::watchlists as store;
 
 /// Bounds for the per-list auto-refresh interval. On the default free providers the floor
@@ -47,6 +49,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/watchlists/alerts/{alert_id}",
             axum::routing::patch(patch_alert).delete(delete_alert),
+        )
+        .route(
+            "/api/watchlists/items/{item_id}/observations",
+            get(list_observations).post(add_observation),
+        )
+        .route(
+            "/api/watchlists/observations/{observation_id}",
+            axum::routing::patch(patch_observation).delete(delete_observation),
         )
 }
 
@@ -513,6 +523,124 @@ async fn delete_alert(
 ) -> Result<Json<Value>, ApiError> {
     if !alerts_store::delete(&state.pool, alert_id).await? {
         return Err(ApiError::not_found("alert not found"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ── Price observations ────────────────────────────────────────────────────────
+//
+// A price observation is a *user* record: "at this time, around this price, I left an
+// observation". The system's daily bars stay in the Market layer (the item's cached
+// quote history) and are never copied here — this table only holds the user's snapshots.
+
+/// The price the user saw: the item's cached quote — the same value the Watchlist row and
+/// the modal render. The server resolves it at record time rather than trusting a number
+/// from the browser, so `price_snapshot` freezes the displayed quote.
+fn item_quote_price(item: &store::Item) -> Option<f64> {
+    item.quote
+        .get("price_usd")
+        .and_then(Value::as_f64)
+        .filter(|p| p.is_finite() && *p > 0.0)
+}
+
+/// Quote currency of the snapshot ('CNY' for China Market, 'USD' otherwise), frozen on the
+/// observation so the stored price renders correctly even if the item's source changes.
+fn item_quote_currency(item: &store::Item) -> String {
+    item.quote
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| {
+            if item.provider == "china" { "CNY" } else { "USD" }.to_string()
+        })
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct ObservationInput {
+    /// The user's note; may be empty (a bare price point is a valid observation). Editing
+    /// only ever touches this field — price_snapshot and recorded_at stay frozen.
+    #[serde(default)]
+    note: String,
+}
+
+async fn list_observations(
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    store::get_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("item not found"))?;
+    let observations = obs_store::list_for_item(&state.pool, item_id).await?;
+    Ok(Json(json!({ "observations": observations })))
+}
+
+/// Record an observation for an item. The client submits at most a note; the frozen
+/// `price_snapshot` and `recorded_at` are decided server-side from the item's current
+/// cached quote and the server clock.
+async fn add_observation(
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Json(b): Json<ObservationInput>,
+) -> Result<Json<Value>, ApiError> {
+    let mut item = store::get_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("item not found"))?;
+    let price = match item_quote_price(&item) {
+        Some(p) => p,
+        None => {
+            // No usable cached quote (freshly added item, or the last refresh failed):
+            // try one live re-quote before giving up so a record can still be made.
+            if let Some(wl) = store::get_watchlist(&state.pool, item.watchlist_id).await? {
+                let _guard = state.watchlists_refresh.lock().await;
+                if let Err(e) = quotes::refresh_item(&state.pool, &wl, &item).await {
+                    tracing::warn!(
+                        "observation price refresh for {} ({}) failed: {e:#}",
+                        item.symbol,
+                        item.id
+                    );
+                }
+                if let Some(fresh) = store::get_item(&state.pool, item.id).await? {
+                    item = fresh;
+                }
+            }
+            item_quote_price(&item).ok_or_else(|| {
+                ApiError::internal(
+                    "current price unavailable — refresh the watchlist and try again",
+                )
+            })?
+        }
+    };
+    let currency = item_quote_currency(&item);
+    let observation = obs_store::add(
+        &state.pool,
+        item_id,
+        OffsetDateTime::now_utc(),
+        price,
+        &currency,
+        b.note.trim(),
+    )
+    .await?;
+    Ok(Json(json!({ "observation": observation })))
+}
+
+async fn patch_observation(
+    State(state): State<AppState>,
+    Path(observation_id): Path<Uuid>,
+    Json(b): Json<ObservationInput>,
+) -> Result<Json<Value>, ApiError> {
+    let observation = obs_store::update_note(&state.pool, observation_id, b.note.trim())
+        .await?
+        .ok_or_else(|| ApiError::not_found("observation not found"))?;
+    Ok(Json(json!({ "observation": observation })))
+}
+
+async fn delete_observation(
+    State(state): State<AppState>,
+    Path(observation_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    if !obs_store::delete(&state.pool, observation_id).await? {
+        return Err(ApiError::not_found("observation not found"));
     }
     Ok(Json(json!({ "ok": true })))
 }

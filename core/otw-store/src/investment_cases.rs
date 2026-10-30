@@ -1,5 +1,12 @@
 //! Investment Case (Phase 1 MVP): per-user research entity for one instrument,
-//! linked to exactly one Editor document.
+//! with an OPTIONAL association to one Editor document (its research body).
+//!
+//! The case is authoritative on its own: decisions / thesis / current state do
+//! not depend on the page. `document_id` is a detachable reference — deleting
+//! the page from the Editor unlinks it (document_id → NULL, FK ON DELETE
+//! SET NULL) instead of cascading into the case or failing. When a research
+//! page is needed again (re-entering research after a delete), a fresh page is
+//! created under the shared root folder [`RESEARCH_FOLDER_TITLE`] and relinked.
 //!
 //! Positions/PnL are NOT stored here. Live data is aggregated from the Portfolio
 //! Tracker — the single source of truth — using the exact same financial
@@ -22,15 +29,21 @@
 
 use anyhow::Context;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::documents;
+use crate::documents::{self, DocumentMeta};
 use crate::journal_fx;
+use crate::market_quotes;
 use crate::portfolios::{self, Asset};
 
 // ── Types ────────────────────────────────────────────────────────────────────
+
+/// Root folder that research pages (one per case) live in. Case research pages
+/// are auto-placed under this folder instead of the tree root. Kept in sync
+/// with the folder the migration 9000000104 creates.
+pub const RESEARCH_FOLDER_TITLE: &str = "股票研究";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct InvestmentCase {
@@ -43,12 +56,15 @@ pub struct InvestmentCase {
     pub exchange: String,
     pub currency: String,
     pub asset_class: String,
-    pub document_id: Uuid,
-    /// Projection of the LATEST change record — only updated transactionally
-    /// by `record_change`, never edited standalone.
+    /// The case's current research page in the Editor. Optional: deleting that
+    /// page from the Editor unlinks it (NULL); a fresh page is created and
+    /// relinked the next time research is entered for this case.
+    pub document_id: Option<Uuid>,
+    /// Projection of the LATEST decision/change record — the four fields below
+    /// are derived data, only updated transactionally by [`record_change`],
+    /// never edited standalone.
     pub current_action: Option<String>,
     pub current_confidence: Option<i16>,
-    /// Standalone-autosaved current-state fields.
     pub valuation_view: Option<String>,
     pub current_biggest_question: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -72,6 +88,11 @@ pub struct DecisionRecord {
     /// Text SNAPSHOT of the assumption at record time — later thesis edits must
     /// not rewrite history.
     pub affected_assumption_text: String,
+    /// Valuation judgement AT THIS ROUND (mirrors the case-level vocabulary;
+    /// carries the round's own reading, later rounds never overwrite it).
+    pub valuation_view: Option<String>,
+    /// The biggest open question AT THIS ROUND (frozen for history).
+    pub biggest_question: String,
     /// Legacy decision fields (deprecated for new records, kept for old ones).
     pub reason: String,
     pub evidence: String,
@@ -192,6 +213,54 @@ pub async fn find_case_by_document_id(
         .await?)
 }
 
+/// One row of the Research home list: the case plus its latest change time
+/// (None when no change/decision record exists yet). Live position is NOT part
+/// of this row — the list page pulls it per case from the existing /live
+/// aggregation, which stays the single place positions/P&L are computed.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct InvestmentCaseRow {
+    pub id: Uuid,
+    pub provider: String,
+    pub provider_id: String,
+    pub symbol: String,
+    pub name: String,
+    pub exchange: String,
+    pub currency: String,
+    pub asset_class: String,
+    pub document_id: Option<Uuid>,
+    pub current_action: Option<String>,
+    pub current_confidence: Option<i16>,
+    pub valuation_view: Option<String>,
+    pub current_biggest_question: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub latest_change_at: Option<OffsetDateTime>,
+}
+
+/// The user's investment cases for the Research home list, most recently
+/// changed first (cases never changed come last, ordered by creation time).
+pub async fn list_cases_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> anyhow::Result<Vec<InvestmentCaseRow>> {
+    Ok(sqlx::query_as(
+        "SELECT ic.id, ic.provider, ic.provider_id, ic.symbol, ic.name, ic.exchange,
+                ic.currency, ic.asset_class, ic.document_id,
+                ic.current_action, ic.current_confidence, ic.valuation_view,
+                ic.current_biggest_question, ic.created_at,
+                (SELECT dr.recorded_at FROM decision_records dr
+                  WHERE dr.investment_case_id = ic.id
+                  ORDER BY dr.recorded_at DESC, dr.id DESC LIMIT 1) AS latest_change_at
+         FROM investment_cases ic
+         WHERE ic.user_id = $1
+         ORDER BY latest_change_at DESC NULLS LAST, ic.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 fn research_document_title(symbol: &str, name: &str) -> String {
     let symbol = symbol.trim();
     let name = name.trim();
@@ -206,11 +275,13 @@ fn research_document_title(symbol: &str, name: &str) -> String {
 /// identity fields server-side from the given portfolio asset. Idempotent and
 /// concurrency-safe:
 ///
-/// - fast path: existing case → return it;
+/// - fast path: existing case → return it (creating a fresh research page when
+///   the previous one was deleted from the Editor);
 /// - slow path: transaction that re-checks, then creates the research document
-///   and the case. If the case INSERT loses a unique-constraint race, the whole
-///   transaction (INCLUDING the already-created document) is rolled back and the
-///   winner's case is returned — never an orphan document, never two cases.
+///   (under the “股票研究” folder) and the case. If the case INSERT loses a
+///   unique-constraint race, the whole transaction (INCLUDING the already-
+///   created document) is rolled back and the winner's case is returned —
+///   never an orphan document, never two cases.
 pub async fn ensure_case(
     pool: &PgPool,
     user_id: Uuid,
@@ -219,7 +290,7 @@ pub async fn ensure_case(
     if let Some(c) = get_case_by_instrument(pool, user_id, &asset.provider, &asset.provider_id)
         .await?
     {
-        return Ok(c);
+        return ensure_case_document(pool, &c).await;
     }
 
     let mut tx = pool.begin().await?;
@@ -234,11 +305,12 @@ pub async fn ensure_case(
     .await?;
     if let Some(c) = existing {
         tx.commit().await?;
-        return Ok(c);
+        return ensure_case_document(pool, &c).await;
     }
 
     let title = research_document_title(&asset.symbol, &asset.name);
-    let doc = documents::create_with(&mut tx, None, "page", &title).await?;
+    let folder_id = ensure_research_folder(&mut *tx).await?;
+    let doc = documents::create_with(&mut *tx, Some(folder_id), "page", &title).await?;
 
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         "INSERT INTO investment_cases
@@ -274,15 +346,126 @@ pub async fn ensure_case(
         .context("case row missing right after insert")?,
         None => {
             // Unique-constraint race lost: roll back so the research document we
-            // just created is NOT orphaned, then return the winner's case.
+            // just created is NOT orphaned, then make sure the winner's case has
+            // its research page and return it.
             tx.rollback().await?;
-            return get_case_by_instrument(pool, user_id, &asset.provider, &asset.provider_id)
-                .await?
-                .context("concurrent ensure left no case behind");
+            let winner = get_case_by_instrument(
+                pool,
+                user_id,
+                &asset.provider,
+                &asset.provider_id,
+            )
+            .await?
+            .context("concurrent ensure left no case behind")?;
+            return ensure_case_document(pool, &winner).await;
         }
     };
     tx.commit().await?;
     Ok(case)
+}
+
+/// Make sure the case has a research page again: when `document_id` is NULL
+/// (its page was deleted from the Editor), a fresh page is created under the
+/// research folder and relinked. Otherwise the case is returned unchanged.
+async fn ensure_case_document(
+    pool: &PgPool,
+    case: &InvestmentCase,
+) -> anyhow::Result<InvestmentCase> {
+    if case.document_id.is_some() {
+        return Ok(case.clone());
+    }
+    let mut tx = pool.begin().await?;
+    // Re-check under an exclusive lock (two callers may race to recreate).
+    let current: Option<InvestmentCase> =
+        case_select!("WHERE id = $1 FOR UPDATE").bind(case.id).fetch_optional(&mut *tx).await?;
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(case.clone());
+    };
+    if current.document_id.is_none() {
+        attach_fresh_document(&mut *tx, &current).await?;
+    }
+    let updated = case_select!("WHERE id = $1")
+        .bind(current.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
+/// Find the case's research page, creating a fresh (empty) one under the
+/// research folder when the current link is NULL or points at a missing
+/// document. Returns `None` only when no such case exists. Used by the
+/// case-scoped API (`POST /investment-cases/{id}/research-document`) so the
+/// page is (re)created on demand, never as a GET side effect.
+pub async fn ensure_research_document(
+    pool: &PgPool,
+    case_id: Uuid,
+) -> anyhow::Result<Option<DocumentMeta>> {
+    // Fast path without side effects: an existing, loadable page is returned.
+    if let Some(case) = get_case(pool, case_id).await? {
+        if let Some(doc_id) = case.document_id {
+            let mut conn = pool.acquire().await?;
+            if let Some(meta) = documents::get_meta(&mut conn, doc_id).await? {
+                return Ok(Some(meta));
+            }
+        }
+    }
+
+    // Slow path: lock the case, (re)create and relink when needed.
+    let mut tx = pool.begin().await?;
+    let case: Option<InvestmentCase> =
+        case_select!("WHERE id = $1 FOR UPDATE").bind(case_id).fetch_optional(&mut *tx).await?;
+    let Some(case) = case else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let meta = match case.document_id {
+        Some(doc_id) => match documents::get_meta(&mut *tx, doc_id).await? {
+            // Stale pointer (page deleted out-of-band): recreate.
+            Some(m) => m,
+            None => attach_fresh_document(&mut *tx, &case).await?,
+        },
+        None => attach_fresh_document(&mut *tx, &case).await?,
+    };
+    tx.commit().await?;
+    Ok(Some(meta))
+}
+
+/// The shared root folder for research pages, created once when missing and
+/// reused afterwards. Keeps research articles out of the tree root.
+async fn ensure_research_folder(conn: &mut PgConnection) -> anyhow::Result<Uuid> {
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM documents
+         WHERE kind = 'folder' AND title = $1 AND parent_id IS NULL
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(RESEARCH_FOLDER_TITLE)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
+    let folder = documents::create_with(conn, None, "folder", RESEARCH_FOLDER_TITLE).await?;
+    Ok(folder.id)
+}
+
+/// Create a fresh (empty) research page for the case under the research folder
+/// and link it. The caller must hold the case row (or be inside the
+/// `ensure_case` transaction) so two recreates cannot double-create.
+async fn attach_fresh_document(
+    conn: &mut PgConnection,
+    case: &InvestmentCase,
+) -> anyhow::Result<DocumentMeta> {
+    let folder_id = ensure_research_folder(conn).await?;
+    let title = research_document_title(&case.symbol, &case.name);
+    let doc = documents::create_with(conn, Some(folder_id), "page", &title).await?;
+    sqlx::query("UPDATE investment_cases SET document_id = $2 WHERE id = $1")
+        .bind(case.id)
+        .bind(doc.id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(doc)
 }
 
 // ── Live aggregation ─────────────────────────────────────────────────────────
@@ -329,17 +512,41 @@ pub async fn instrument_position(
             .unwrap_or_else(|| "—".to_string())
     };
 
-    // Price selection policy: the asset with the latest last_price_at.
-    let price_usd = assets
+    // Price selection: the shared Market Quote (freshly ensured by the /live endpoint)
+    // wins when it is at least as new as the newest asset-level last price; otherwise the
+    // latest persisted asset price is used. Either way the price is USD, then converted to
+    // the case currency below — so every portfolio slice and the totals value the SAME
+    // current market price, no matter which module refreshed it last.
+    let local_best: Option<(f64, Option<OffsetDateTime>)> = assets
         .iter()
         .filter_map(|a| a.last_price_usd.map(|p| (p, a.last_price_at)))
         .max_by(|x, y| x.1.cmp(&y.1));
+    let shared = match market_quotes::get(pool, &case.provider, &case.provider_id).await? {
+        Some(q) if q.price_usd > 0.0 => Some((q.price_usd, q.quote_at)),
+        _ => None,
+    };
+    let price_usd = match (local_best, shared) {
+        (None, None) => None,
+        (Some((p, at)), None) => Some((p, at.unwrap_or_else(OffsetDateTime::now_utc))),
+        (None, Some(s)) => Some(s),
+        (Some((lp, la)), Some((sp, sa))) => {
+            let shared_newer = match la {
+                Some(lt) => sa >= lt,
+                None => true,
+            };
+            if shared_newer {
+                Some((sp, sa))
+            } else {
+                Some((lp, la.unwrap_or(sa)))
+            }
+        }
+    };
     let (price, price_at) = match price_usd {
         Some((p, at)) => (
             journal_fx::convert(pool, p, "USD", &case.currency, today)
                 .await?
                 .or(Some(p)),
-            at,
+            Some(at),
         ),
         None => (None, None),
     };
@@ -421,6 +628,10 @@ pub struct NewChange<'a> {
     pub what_happened: &'a str,
     pub impact_direction: Option<&'a str>,
     pub affected_assumption_id: Option<Uuid>,
+    /// Valuation judgement for this round (cheap/fair/expensive/unclear).
+    pub valuation_view: Option<&'a str>,
+    /// Biggest open question for this round.
+    pub biggest_question: &'a str,
     pub reason: &'a str,
     pub evidence: &'a str,
     pub counter_evidence: &'a str,
@@ -485,11 +696,13 @@ pub async fn record_change(
             snapshot_exchange, snapshot_currency,
             snapshot_price, snapshot_price_at,
             snapshot_quantity, snapshot_avg_cost, snapshot_cost_basis,
-            snapshot_market_value, snapshot_unrealized_pnl, snapshot_unrealized_pct
+            snapshot_market_value, snapshot_unrealized_pnl, snapshot_unrealized_pct,
+            valuation_view, biggest_question
          ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
             $10, $11, $12, $13, $14, $15,
-            $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+            $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
+            $30, $31
          )
          RETURNING *",
     )
@@ -522,39 +735,32 @@ pub async fn record_change(
     .bind(pos.market_value)
     .bind(pos.unrealized_pnl)
     .bind(pos.unrealized_pct)
+    .bind(input.valuation_view)
+    .bind(input.biggest_question)
     .fetch_one(&mut *tx)
     .await?;
 
-    // Project the new current state in the same transaction.
-    sqlx::query("UPDATE investment_cases SET current_action = $2, current_confidence = $3 WHERE id = $1")
-        .bind(case.id)
-        .bind(input.decision_type)
-        .bind(input.confidence)
-        .execute(&mut *tx)
-        .await?;
+    // Project the new current judgement in the same transaction. current_action /
+    // current_confidence / valuation_view / current_biggest_question on the case
+    // are derived data — mirrors of the LATEST record, never edited standalone.
+    sqlx::query(
+        "UPDATE investment_cases
+            SET current_action = $2,
+                current_confidence = $3,
+                valuation_view = $4,
+                current_biggest_question = $5
+          WHERE id = $1",
+    )
+    .bind(case.id)
+    .bind(input.decision_type)
+    .bind(input.confidence)
+    .bind(input.valuation_view)
+    .bind(input.biggest_question)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok(record)
-}
-
-/// Standalone-autosaved current-state fields (valuation view / biggest
-/// question). `current_action` and `current_confidence` are deliberately NOT
-/// settable here — they only change via [`record_change`].
-pub async fn update_current_state(
-    pool: &PgPool,
-    case_id: Uuid,
-    valuation_view: Option<&str>,
-    current_biggest_question: Option<&str>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE investment_cases SET valuation_view = $2, current_biggest_question = $3 WHERE id = $1",
-    )
-    .bind(case_id)
-    .bind(valuation_view)
-    .bind(current_biggest_question.unwrap_or(""))
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 // ── Thesis (low frequency) ───────────────────────────────────────────────────

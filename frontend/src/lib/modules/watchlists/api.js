@@ -65,6 +65,27 @@ export const watchlistsApi = {
     ),
   removeAlert: (alertId) => req(`/watchlists/alerts/${alertId}`, { method: 'DELETE' }),
 
+  /**
+   * Price observations — the user's own "I noted this price at this moment" snapshots.
+   * GET returns them newest first; POST records the item's current server-side quote
+   * (the body carries at most a note); PATCH edits the note only; DELETE removes the
+   * record. The frozen price_snapshot / recorded_at are never client-editable.
+   */
+  listObservations: (itemId) =>
+    req(`/watchlists/items/${itemId}/observations`).then((r) => r.observations),
+  addObservation: (itemId, note) =>
+    req(`/watchlists/items/${itemId}/observations`, {
+      method: 'POST',
+      body: JSON.stringify({ note })
+    }).then((r) => r.observation),
+  updateObservation: (observationId, note) =>
+    req(`/watchlists/observations/${observationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ note })
+    }).then((r) => r.observation),
+  removeObservation: (observationId) =>
+    req(`/watchlists/observations/${observationId}`, { method: 'DELETE' }),
+
   /** Copy a portfolio's assets onto the list (reconciles duplicates). Returns fresh items. */
   importPortfolio: (watchlistId, portfolioId) =>
     req(`/watchlists/${watchlistId}/import`, {

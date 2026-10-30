@@ -15,6 +15,8 @@
   import Highlight from '@tiptap/extension-highlight';
   import Underline from '@tiptap/extension-underline';
   import SlashMenu from './SlashMenu.svelte';
+  import DocumentOutline from './DocumentOutline.svelte';
+  import { collectHeadings } from './outline.js';
   import { recentColors, pushRecent } from './recent-colors.svelte.js';
   import { toggleCodeBlockMerged } from './code-block.js';
   import PromptModal from '$lib/ui/PromptModal.svelte';
@@ -23,13 +25,15 @@
   import { t } from '$lib/i18n';
 
   // props: content (ProseMirror JSON | null), onChange(json), titleSlot (snippet),
-  // layout ('normal' | 'wide'), onLayoutChange(layout)
+  // layout ('normal' | 'wide'), onLayoutChange(layout), readOnly (hide toolbar,
+  // make the document non-editable; the same editor instance keeps its content)
   let {
     content = null,
     onChange = () => {},
     titleSlot = null,
     layout = 'normal',
-    onLayoutChange = () => {}
+    onLayoutChange = () => {},
+    readOnly = false
   } = $props();
 
   let element;
@@ -38,10 +42,116 @@
   // Document position right after the '/' that opened the menu (start of query).
   let slashFrom = 0;
 
+  // ── Document outline (derived data — never persisted) ──────────────────────
+  // The outline is recomputed from the ProseMirror doc only when the document's
+  // content changes (never on selection-only transactions), and mapped onto the
+  // rendered heading DOM nodes at interaction time. No ids, anchors or TOC data
+  // are stored anywhere: the rich-text document stays the single source of truth.
+  let headings = $state([]); // [{ level, text }] in document order
+  let activeHeading = $state(-1); // index of the section currently being read
+  let scroller; // the editor's own scroll container (.scroll)
+  let frameRoot; // width decides whether the outline sits beside or folds
+  let docGrid; // resize here means heading geometry changed (re-wrap, layout)
+  let sideMode = $state(true); // rail beside the text; false → folded bar
+  let foldOpen = $state(false); // folded outline expanded
+  let outlineReady = $state(false); // flipped once when the editor mounts
+  const hasOutline = $derived(headings.length > 0);
+  const outlineLabel = $derived($t('editor.editor.documentOutline'));
+
+  const OUTLINE_FOLD_BREAKPOINT = 960; // frame width below which the outline folds
+  const OUTLINE_READ_OFFSET = 96; // scrollport inset where a heading becomes "current"
+
+  let spyQueued = false;
+
+  // Rendered semantic headings, in document order. Empty headings are not part of
+  // the outline, so they are filtered out to keep indexes aligned with `headings`.
+  function headingEls() {
+    if (!element) return [];
+    return Array.from(element.querySelectorAll('h1, h2, h3')).filter((el) => el.textContent.trim());
+  }
+
+  // Single doc traversal on content change — the only place the outline is derived.
+  function rebuildOutline() {
+    headings = editor ? collectHeadings(editor.getJSON()) : [];
+    updateSideMode(); // also measures narrow/wide → side rail vs folded bar
+    scheduleSpy();
+  }
+
+  // One geometry pass per frame at most; scroll events only re-highlight, they
+  // never re-scan the document.
+  function scheduleSpy() {
+    if (spyQueued) return;
+    spyQueued = true;
+    requestAnimationFrame(() => {
+      spyQueued = false;
+      spy();
+    });
+  }
+
+  // "Current section" = the last heading whose top edge has crossed a reading line
+  // just inside the top of the scrollport. Driven by scroll position — no observer
+  // root assumption, so it works whatever the real scroll container is.
+  function spy() {
+    if (!scroller || !element) return;
+    const probe = scroller.getBoundingClientRect().top + OUTLINE_READ_OFFSET;
+    let idx = -1;
+    for (const el of headingEls()) {
+      if (el.getBoundingClientRect().top <= probe) idx += 1;
+      else break;
+    }
+    activeHeading = idx;
+  }
+
+  function updateSideMode() {
+    sideMode = frameRoot ? frameRoot.clientWidth >= OUTLINE_FOLD_BREAKPOINT : true;
+    scheduleSpy(); // column width may have changed → heading geometry moved
+  }
+
+  // Click a heading in the outline → scroll the editor's own container so that
+  // heading lands exactly where the document starts (same top padding). Only the
+  // editor's scroller is touched — never the browser URL, never another scrollbar.
+  function jumpToHeading(i) {
+    const el = headingEls()[i];
+    if (!el || !scroller) return;
+    activeHeading = i;
+    const pad = parseFloat(getComputedStyle(scroller).paddingTop) || 0;
+    const targetTop =
+      scroller.scrollTop + (el.getBoundingClientRect().top - scroller.getBoundingClientRect().top);
+    scroller.scrollTo({ top: Math.max(0, targetTop - pad), behavior: 'smooth' });
+  }
+
+  // Keep the scroll-spy and the side/fold decision attached to the live DOM. The
+  // gate is `outlineReady` (set once on mount), NOT `editor`: the toolbar refresh
+  // in onTransaction reassigns `editor` on every keystroke, which would otherwise
+  // tear down and re-create these listeners per transaction.
+  $effect(() => {
+    if (!outlineReady || !scroller) return;
+    const onScroll = () => scheduleSpy();
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    const ro = new ResizeObserver(() => {
+      updateSideMode();
+      scheduleSpy();
+    });
+    if (frameRoot) ro.observe(frameRoot);
+    if (docGrid) ro.observe(docGrid);
+    return () => {
+      scroller.removeEventListener('scroll', onScroll);
+      ro.disconnect();
+    };
+  });
+
   // ── Modals ──
   // A single prompt modal, reconfigured per call-to-action.
   let prompt = $state({ open: false, title: '', fields: [], confirmLabel: 'OK', onconfirm: () => {} });
   let errorMsg = $state(''); // non-empty => error modal shown
+
+  // `readOnly` may flip AFTER mount (notes page toggles read/edit on the same
+  // instance). The guard makes each transaction-driven run a cheap no-op.
+  $effect(() => {
+    if (!outlineReady || !editor) return;
+    const editable = !readOnly;
+    if (editor.isEditable !== editable) editor.setEditable(editable);
+  });
 
   function openPrompt(cfg) {
     prompt = { open: true, confirmLabel: 'OK', onconfirm: () => {}, ...cfg };
@@ -50,6 +160,9 @@
   onMount(() => {
     editor = new Editor({
       element,
+      // Read-only mounts the same ProseMirror document but not editable; the
+      // toolbar is hidden and no keystrokes can reach the content.
+      editable: !readOnly,
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3] },
@@ -74,6 +187,8 @@
       content: content ?? '',
       onUpdate: ({ editor }) => {
         onChange(editor.getJSON());
+        // Content changed (never a selection-only transaction) → re-derive outline.
+        rebuildOutline();
       },
       onTransaction: () => {
         // force reactive refresh of toolbar active states
@@ -83,8 +198,11 @@
       }
     });
 
+    rebuildOutline();
+
     // Slash-menu trigger: open when the user types '/' at the start of an empty block.
     element.addEventListener('keydown', onKeydown, true);
+    outlineReady = true;
   });
 
   onDestroy(() => {
@@ -107,6 +225,7 @@
   // Replace content when switching documents.
   export function setContent(json) {
     if (editor) editor.commands.setContent(json ?? '');
+    rebuildOutline();
   }
 
   // Faithful rendered HTML of the current doc — used when submitting for publication.
@@ -375,8 +494,8 @@
   {/if}
 {/snippet}
 
-<div class="editor-wrap">
-  {#if editor}
+<div class="editor-wrap" class:readonly={readOnly}>
+  {#if editor && !readOnly}
     <div class="toolbar">
       <button class:active={is('heading', { level: 1 })} onclick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} title={$t('editor.editor.heading1')}>H1</button>
       <button class:active={is('heading', { level: 2 })} onclick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} title={$t('editor.editor.heading2')}>H2</button>
@@ -478,7 +597,11 @@
       <button
         class="width-toggle"
         class:active={layout === 'wide'}
-        onclick={() => onLayoutChange(layout === 'wide' ? 'normal' : 'wide')}
+        onclick={() => {
+          onLayoutChange(layout === 'wide' ? 'normal' : 'wide');
+          // Column width changes → heading geometry moved → re-run the spy.
+          scheduleSpy();
+        }}
         title={layout === 'wide' ? $t('editor.editor.switchToNormalWidth') : $t('editor.editor.switchToFullWidth')}
       >
         <Icon name="move-horizontal" size={12} /> {layout === 'wide' ? $t('editor.editor.wide') : $t('editor.editor.normal')}
@@ -486,13 +609,41 @@
     </div>
   {/if}
 
-  <div class="scroll">
-    <div class="column" class:wide={layout === 'wide'}>
-      {#if titleSlot}{@render titleSlot()}{/if}
-      <div class="prose" bind:this={element}></div>
-      <!-- Clicking the empty space under the document starts a new paragraph
-           there, instead of doing nothing because it sits outside ProseMirror. -->
-      <div class="filler" role="presentation" onmousedown={appendAtEnd}></div>
+  <div class="scroll" bind:this={scroller}>
+    <div class="frame-root" bind:this={frameRoot}>
+      {#if hasOutline && !sideMode}
+        <!-- Narrow space: the outline folds into a toggle above the document. -->
+        <div class="outline-fold">
+          <button type="button" class="fold-btn" aria-expanded={foldOpen} onclick={() => (foldOpen = !foldOpen)}>
+            <span class="fold-label">{outlineLabel}</span>
+            <span class="fold-caret" aria-hidden="true">{foldOpen ? '▾' : '▸'}</span>
+          </button>
+          {#if foldOpen}
+            <div class="fold-panel">
+              <DocumentOutline items={headings} active={activeHeading} onpick={jumpToHeading} label={outlineLabel} />
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <div class="doc-grid" class:side={hasOutline && sideMode} bind:this={docGrid}>
+        <div class="column" class:wide={layout === 'wide'}>
+          {#if titleSlot}{@render titleSlot()}{/if}
+          <div class="prose" bind:this={element}></div>
+          {#if !readOnly}
+            <!-- Clicking the empty space under the document starts a new paragraph
+                 there, instead of doing nothing because it sits outside ProseMirror. -->
+            <div class="filler" role="presentation" onmousedown={appendAtEnd}></div>
+          {/if}
+        </div>
+
+        {#if hasOutline && sideMode}
+          <!-- Sticky beside the document: stays visible while the text scrolls. -->
+          <aside class="outline-rail">
+            <DocumentOutline items={headings} active={activeHeading} onpick={jumpToHeading} label={outlineLabel} />
+          </aside>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -709,7 +860,32 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: var(--space-8) var(--space-6) 0;
+    padding: var(--space-8) var(--space-6) var(--space-8);
+  }
+  /* Read-only mode: no toolbar above the scroll area, so the extra top padding
+     would push the first line needlessly far from the container edge. */
+  .editor-wrap.readonly .scroll {
+    padding-top: var(--space-4);
+  }
+  /* Root of the editable surface: spans the whole scrollport when the document is
+     short, grows with it when it is long. */
+  .frame-root {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  /* The text column is one grid track; when the outline sits beside the document,
+     a second fixed track is reserved for it and the text keeps its reading width. */
+  .doc-grid {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .doc-grid.side {
+    grid-template-columns: minmax(0, 1fr) 236px;
+    column-gap: var(--space-6);
   }
   /* Shared centered column so the title and body line up exactly. */
   .column {
@@ -717,11 +893,12 @@
     flex-direction: column;
     width: 100%;
     max-width: 860px;
-    min-height: 100%;
-    margin: 0 auto;
+    min-width: 0;
+    justify-self: center;
   }
   .column.wide {
     max-width: none;
+    justify-self: stretch;
   }
   .prose {
     outline: none;
@@ -730,6 +907,51 @@
   .filler {
     flex: 1 0 25vh;
     cursor: text;
+  }
+
+  /* Outline rail (wide enough): sticky, so it stays visible while the document
+     scrolls; the list scrolls inside itself when longer than the viewport. The
+     height cap is inherited by DocumentOutline's .do-scroll via --outline-cap. */
+  .outline-rail {
+    --outline-cap: calc(100vh - var(--topbar-height) - 190px);
+    position: sticky;
+    top: var(--space-8);
+    align-self: start;
+    min-width: 0;
+  }
+
+  /* Narrow space: the outline folds into a sticky toggle above the document. */
+  .outline-fold {
+    position: sticky;
+    top: var(--space-8);
+    z-index: var(--z-sticky);
+    width: 100%;
+    margin-bottom: var(--space-3);
+    background: var(--bg);
+  }
+  .fold-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    padding: 4px 6px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .fold-btn:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+  .fold-caret {
+    color: var(--muted);
+  }
+  .fold-panel {
+    --outline-cap: min(40vh, 380px);
+    padding: var(--space-1) 0 var(--space-2);
   }
 
   /* TipTap content styling */
@@ -747,6 +969,11 @@
   }
   :global(.prose .tiptap:focus) {
     outline: none;
+  }
+  /* The first content block starts right below the top padding — no extra
+     leading whitespace between the toolbar/edge and the document. */
+  :global(.prose .tiptap > :first-child) {
+    margin-top: 0;
   }
   :global(.prose .tiptap p) {
     margin: 0.5em 0;

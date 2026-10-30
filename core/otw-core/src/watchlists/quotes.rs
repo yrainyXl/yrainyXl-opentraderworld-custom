@@ -148,7 +148,18 @@ fn daily_closes(series: &[(i64, f64)]) -> Vec<(i64, f64)> {
 /// open (the usual intraday "day change") and on the close before the just-finished
 /// session after hours — so a closed market shows the last session's move, not 0%.
 /// `spark` is the completed daily closes with the live spot appended.
-fn compute_quote(history: &[(i64, f64)], live: f64, now_sec: i64, currency: &str) -> Value {
+///
+/// `history_fetched_at` is when the series came from the provider (see [`cached_history`]).
+/// It is stored separately from `history_at` (this computation's time) because the TTL
+/// must be measured from the *fetch*, not from every recompute — otherwise the series
+/// would look perpetually fresh and never be refreshed at all.
+fn compute_quote(
+    history: &[(i64, f64)],
+    live: f64,
+    now_sec: i64,
+    currency: &str,
+    history_fetched_at: i64,
+) -> Value {
     let daily = daily_closes(history);
     let today = now_sec / 86_400;
     // Completed sessions only: the provider's point for the current UTC day is a partial
@@ -180,12 +191,17 @@ fn compute_quote(history: &[(i64, f64)], live: f64, now_sec: i64, currency: &str
         "spark": spark,
         "history": history.iter().map(|(t, v)| json!([t, v])).collect::<Vec<_>>(),
         "history_at": now_sec,
+        "history_fetched_at": history_fetched_at,
     })
 }
 
-/// Read the cached daily series back out of an item's quote, if still within `HISTORY_TTL`.
-fn cached_history(item: &store::Item, now_sec: i64) -> Option<Vec<(i64, f64)>> {
-    let at = item.quote.get("history_at").and_then(Value::as_i64)?;
+/// Read the cached daily series back out of an item's quote, if the series itself is still
+/// within `HISTORY_TTL` of when it was fetched (returns it with that fetch time).
+///
+/// A quote written before `history_fetched_at` existed counts as expired: it is refetched
+/// once, which is also what repairs series that were frozen by the old stamping.
+fn cached_history(item: &store::Item, now_sec: i64) -> Option<(Vec<(i64, f64)>, i64)> {
+    let at = item.quote.get("history_fetched_at").and_then(Value::as_i64)?;
     if now_sec - at >= HISTORY_TTL {
         return None;
     }
@@ -194,10 +210,36 @@ fn cached_history(item: &store::Item, now_sec: i64) -> Option<Vec<(i64, f64)>> {
     for p in raw {
         series.push((p.get(0)?.as_i64()?, p.get(1)?.as_f64()?));
     }
-    (!series.is_empty()).then_some(series)
+    (!series.is_empty()).then_some((series, at))
 }
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
+
+/// Mirror a successfully quoted watchlist item into the shared `market_quotes` cache
+/// (USD), so Portfolio P&L and Investment Case `/live` see the same current price the
+/// Watchlist row just showed — without any extra provider call (this fetch already
+/// happened). Non-USD quotes (China Market CNY) are converted with the journal FX
+/// rates; a missing rate leaves the shared row unwritten rather than storing a foreign
+/// number as dollars.
+async fn write_shared_quote(
+    pool: &PgPool,
+    item: &store::Item,
+    live: f64,
+    currency: &str,
+    quote_at: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let price_usd = if currency == "USD" {
+        Some(live)
+    } else {
+        otw_store::journal_fx::convert(pool, live, currency, "USD", quote_at.date())
+            .await?
+    };
+    if let Some(usd) = price_usd {
+        otw_store::market_quotes::upsert(pool, &item.provider, &item.provider_id, usd, currency, quote_at)
+            .await?;
+    }
+    Ok(())
+}
 
 /// Re-quote a single item. `crypto_spot` is a prefetched CoinGecko batch when refreshing a
 /// whole list; pass `None` to fetch the single spot here (the add-item path). Returns whether
@@ -214,8 +256,13 @@ async fn quote_item(
             let live = live
                 .or_else(|| series.last().map(|(_, v)| *v))
                 .ok_or_else(|| anyhow!("no price for {}", item.provider_id))?;
-            let quote = compute_quote(&series, live, now_sec, "USD");
+            let quote = compute_quote(&series, live, now_sec, "USD", now_sec);
             store::set_item_quote(pool, item.id, &quote, exchange.as_deref()).await?;
+            if let Err(e) =
+                write_shared_quote(pool, item, live, "USD", OffsetDateTime::now_utc()).await
+            {
+                tracing::warn!("watchlist shared quote for {} failed: {e:#}", item.provider_id);
+            }
             Ok(true)
         }
         // A-share items go through the China Market connector (cn-market service),
@@ -232,15 +279,21 @@ async fn quote_item(
                     .get(&item.provider_id)
                     .copied(),
             };
-            let (history, fetched) = match cached_history(item, now_sec) {
-                Some(h) => (h, false),
-                None => (coingecko_history(&item.provider_id).await?, true),
+            let (history, fetched_at) = match cached_history(item, now_sec) {
+                Some((h, at)) => (h, at),
+                None => (coingecko_history(&item.provider_id).await?, now_sec),
             };
+            let fetched = fetched_at == now_sec;
             let live = live
                 .or_else(|| history.last().map(|(_, v)| *v))
                 .ok_or_else(|| anyhow!("no price for {}", item.provider_id))?;
-            let quote = compute_quote(&history, live, now_sec, "USD");
+            let quote = compute_quote(&history, live, now_sec, "USD", fetched_at);
             store::set_item_quote(pool, item.id, &quote, None).await?;
+            if let Err(e) =
+                write_shared_quote(pool, item, live, "USD", OffsetDateTime::now_utc()).await
+            {
+                tracing::warn!("watchlist shared quote for {} failed: {e:#}", item.provider_id);
+            }
             Ok(fetched)
         }
     }
@@ -479,8 +532,8 @@ async fn quote_via_connector(pool: &PgPool, cx: &ConnectorCx, item: &store::Item
     let now = OffsetDateTime::now_utc();
     let now_sec = now.unix_timestamp();
 
-    let history = match cached_history(item, now_sec) {
-        Some(h) => h,
+    let (history, history_fetched_at) = match cached_history(item, now_sec) {
+        Some((h, at)) => (h, at),
         None => {
             // 70 calendar days of dailies: the 30d change needs a close at-or-before
             // now−30d even across sparse trading calendars.
@@ -501,7 +554,7 @@ async fn quote_via_connector(pool: &PgPool, cx: &ConnectorCx, item: &store::Item
             if series.is_empty() {
                 return Err(anyhow!("no daily bars for {ticker} (wrong provider symbol?)"));
             }
-            series
+            (series, now_sec)
         }
     };
 
@@ -536,8 +589,18 @@ async fn quote_via_connector(pool: &PgPool, cx: &ConnectorCx, item: &store::Item
 
     // Quote currency follows the connector: China Market quotes in CNY, everything else USD.
     let currency = if cx.cap.provider == "china" { "CNY" } else { "USD" };
-    let quote = compute_quote(&history, live, now_sec, currency);
-    store::set_item_quote(pool, item.id, &quote, None).await
+    let quote = compute_quote(&history, live, now_sec, currency, history_fetched_at);
+    store::set_item_quote(pool, item.id, &quote, None).await?;
+    // China A-share items quote through the shared connector — mirror the fresh CNY price
+    // into the shared market-quote cache (converted to USD) like the other Auto paths do.
+    // Custom-connector items whose provider differs from the quote source are left alone
+    // (their price is not the shared default identity).
+    if cx.cap.provider == "china" && item.provider == "china" {
+        if let Err(e) = write_shared_quote(pool, item, live, &currency, OffsetDateTime::now_utc()).await {
+            tracing::warn!("watchlist shared quote for {} failed: {e:#}", item.provider_id);
+        }
+    }
+    Ok(())
 }
 
 /// Minimal percent-encoding for path/query values (same policy as portfolios::prices).
@@ -567,7 +630,7 @@ mod tests {
         let history: Vec<(i64, f64)> = (0..31)
             .map(|i| ((1_000 - 31 + i) * DAY, 100.0 + i as f64))
             .collect();
-        let q = compute_quote(&history, 132.0, now, "USD");
+        let q = compute_quote(&history, 132.0, now, "USD", now);
         // 24h cutoff lands mid-yesterday → yesterday's midnight close 130 → +2/130.
         let c24 = q["change_24h"].as_f64().unwrap();
         assert!((c24 - 2.0 / 130.0 * 100.0).abs() < 1e-9);
@@ -585,7 +648,7 @@ mod tests {
         let now = 1_000 * DAY + DAY / 2;
         // Yesterday's close 100, plus a partial point for today at 105 — live is 102.
         let history = vec![((999) * DAY, 100.0), (1_000 * DAY + 3_600, 105.0)];
-        let q = compute_quote(&history, 102.0, now, "USD");
+        let q = compute_quote(&history, 102.0, now, "USD", now);
         assert!((q["change_24h"].as_f64().unwrap() - 2.0).abs() < 1e-9);
         let spark = q["spark"].as_array().unwrap();
         assert_eq!(spark.len(), 2); // yesterday + live, no duplicated today point
@@ -598,7 +661,7 @@ mod tests {
         let bar = 13 * 3_600 + 1_800;
         let history = vec![(998 * DAY + bar, 100.0), (999 * DAY + bar, 103.0)];
         let now = 1_000 * DAY + 10 * 3_600; // next morning, market closed
-        let q = compute_quote(&history, 103.0, now, "USD");
+        let q = compute_quote(&history, 103.0, now, "USD", now);
         assert!((q["change_24h"].as_f64().unwrap() - 3.0).abs() < 1e-9);
     }
 
@@ -606,8 +669,74 @@ mod tests {
     fn short_history_yields_null_long_horizons() {
         let now = 1_000 * DAY;
         let history = vec![(999 * DAY, 50.0)];
-        let q = compute_quote(&history, 55.0, now, "USD");
+        let q = compute_quote(&history, 55.0, now, "USD", now);
         assert!(q["change_24h"].as_f64().is_some());
         assert!(q["change_30d"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod history_cache_tests {
+    use super::*;
+
+    const DAY: i64 = 86_400;
+
+    fn item(quote: Value) -> store::Item {
+        store::Item {
+            id: uuid::Uuid::new_v4(),
+            watchlist_id: uuid::Uuid::new_v4(),
+            asset_class: "stock".into(),
+            provider: "yahoo".into(),
+            provider_id: "AAPL".into(),
+            symbol: "AAPL".into(),
+            name: "Apple".into(),
+            exchange: String::new(),
+            notes: String::new(),
+            quote_ticker: String::new(),
+            quote_source: String::new(),
+            position: 0.0,
+            quote,
+            quoted_at: None,
+        }
+    }
+
+    fn quote_with(history: Value, fetched_at: Option<i64>) -> Value {
+        let mut q = json!({ "history": history, "history_at": 0 });
+        if let Some(t) = fetched_at {
+            q["history_fetched_at"] = json!(t);
+        }
+        q
+    }
+
+    #[test]
+    fn series_is_reused_only_while_the_fetch_is_within_the_ttl() {
+        let now = 1_000 * DAY;
+        let series = json!([[999 * DAY, 7.5], [1000 * DAY - 3600, 7.9]]);
+
+        // Fresh fetch → cached series (with its fetch time) is reused.
+        let fresh = item(quote_with(series.clone(), Some(now - 60)));
+        let got = cached_history(&fresh, now).expect("fresh series is reused");
+        assert_eq!(got.1, now - 60);
+        assert_eq!(got.0.len(), 2);
+
+        // Fetch older than HISTORY_TTL → refetch.
+        let stale = item(quote_with(series.clone(), Some(now - HISTORY_TTL - 1)));
+        assert!(cached_history(&stale, now).is_none());
+
+        // A quote written before `history_fetched_at` existed counts as expired, so the
+        // old self-refreshing stamp cannot keep a frozen series alive forever.
+        let legacy = item(quote_with(series, None));
+        assert!(cached_history(&legacy, now).is_none());
+    }
+
+    #[test]
+    fn recomputing_does_not_refresh_the_fetch_stamp() {
+        // The regression this guards: `history_at` (recompute time) must never be used as
+        // the TTL stamp, or the series would look perpetually fresh and never refetch.
+        let now = 1_000 * DAY;
+        let history = vec![(999 * DAY, 7.5)];
+        let q = compute_quote(&history, 8.0, now, "CNY", now - 5 * DAY);
+        assert_eq!(q["history_fetched_at"].as_i64(), Some(now - 5 * DAY));
+        assert_eq!(q["history_at"].as_i64(), Some(now));
     }
 }

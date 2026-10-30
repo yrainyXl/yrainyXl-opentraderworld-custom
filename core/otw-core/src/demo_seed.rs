@@ -777,6 +777,7 @@ async fn watchlist_quotes(pool: &PgPool) -> anyhow::Result<()> {
             "history": history,
             // Older than HISTORY_TTL → the first real refresh refetches the true series.
             "history_at": now - 7 * day,
+            "history_fetched_at": now - 7 * day,
         });
         sqlx::query(
             "UPDATE watchlist_items SET quote = $1, quoted_at = now() WHERE provider_id = $2",

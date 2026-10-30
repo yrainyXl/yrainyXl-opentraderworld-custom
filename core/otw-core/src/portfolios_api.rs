@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use time::{format_description::well_known::Iso8601, Date};
 use uuid::Uuid;
 
+use crate::market;
 use crate::portfolios::prices;
 use crate::{ApiError, AppState};
 use otw_store::journal::CURRENCIES;
@@ -51,6 +52,11 @@ async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let portfolios = store::list_portfolios(&state.pool).await?;
     let mut out = Vec::with_capacity(portfolios.len());
     for pf in &portfolios {
+        // Entry freshness: value every card against the shared current Market Quote,
+        // refreshing stale instruments before the P&L is computed — never "as of the last
+        // Portfolio refresh" alone.
+        let assets = store::list_assets(&state.pool, pf.id).await?;
+        market::ensure_portfolio_assets(&state.pool, &assets).await?;
         out.push(store::summary(&state.pool, pf).await?);
     }
     Ok(Json(json!({ "portfolios": out })))
@@ -87,6 +93,11 @@ async fn detail(
     let pf = store::get_portfolio(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("portfolio not found"))?;
+    // Entry freshness: refresh stale shared Market Quotes for this portfolio's instruments
+    // before computing the assets/summary, so the page never re-shows an old price just
+    // because the Portfolio side hasn't refreshed on its own yet.
+    let assets = store::list_assets(&state.pool, id).await?;
+    market::ensure_portfolio_assets(&state.pool, &assets).await?;
     let assets = store::asset_views(&state.pool, &pf).await?;
     let ops = store::list_portfolio_operations(&state.pool, id).await?;
     let operations: Vec<Value> = ops

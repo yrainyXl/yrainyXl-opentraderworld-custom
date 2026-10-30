@@ -1,5 +1,5 @@
 <script>
-  import { moduleForPath, visibleModules } from './registry';
+  import { moduleForPath, visibleModules, moduleLabel } from './registry';
   import { installedIds } from './installed.js';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
@@ -21,7 +21,7 @@
     if (!f) return modules;
     return modules.filter(
       (m) =>
-        m.name.toLowerCase().includes(f) ||
+        moduleLabel(m, $t).toLowerCase().includes(f) ||
         (m.descKey ? $t(m.descKey) : '').toLowerCase().includes(f)
     );
   });
@@ -76,7 +76,7 @@
 <div class="switcher">
   <button class="current" onclick={toggle} aria-haspopup="listbox" aria-expanded={open}>
     <span class="icon"><Icon name={current.icon} /></span>
-    <span class="name">{current.name}</span>
+    <span class="name">{moduleLabel(current, $t)}</span>
     <span class="chevron" class:open><Icon name="chevron-down" size={14} /></span>
   </button>
 
@@ -111,7 +111,7 @@
             >
               <span class="icon"><Icon name={m.icon} /></span>
               <span class="label">
-                <span class="item-name">{m.name}</span>
+                <span class="item-name">{moduleLabel(m, $t)}</span>
                 {#if m.descKey}<span class="item-desc">{$t(m.descKey)}</span>{/if}
               </span>
               {#if m.id === current.id}<span class="check"><Icon name="check" size={14} /></span>{/if}

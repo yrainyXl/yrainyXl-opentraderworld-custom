@@ -16,6 +16,7 @@
   import Sparkline from './Sparkline.svelte';
   import AddSymbolModal from './AddSymbolModal.svelte';
   import AlertsModal from './AlertsModal.svelte';
+  import PriceObservationModal from './PriceObservationModal.svelte';
   import {
     watchlistsApi,
     REFRESH_OPTIONS,
@@ -54,6 +55,8 @@
   let tickerOpen = $state(false);
   let alertItem = $state(null); // item whose price alerts are open
   let alertsOpen = $state(false);
+  let obsItem = $state(null); // item whose price observations are open
+  let obsOpen = $state(false);
 
   // Data-broker connectors granted to Watchlists, offered as custom quote sources. An
   // empty list (nothing granted yet) just leaves the select on Auto; the shortcut next to
@@ -492,7 +495,19 @@
                   {@const v = item.quote?.[c.field]}
                   <td class="num" class:up={v > 0} class:down={v < 0}>{fmtSignedPct(v)}</td>
                 {/each}
-                <td class="sparkcell"><Sparkline values={item.quote?.spark ?? []} china={isChinaItem(item)} /></td>
+                <td class="sparkcell">
+                  <!-- The 30-day sparkline opens the Price Observation modal: system
+                       trend + the user's own observations. Overlay only — the row keeps
+                       its height and the page keeps its scroll position. -->
+                  <button
+                    class="sparkbtn"
+                    onclick={() => ((obsItem = item), (obsOpen = true))}
+                    aria-label={$t('watchlists.obs.sparkAria', { symbol: item.symbol })}
+                    title={$t('watchlists.obs.sparkAria', { symbol: item.symbol })}
+                  >
+                    <Sparkline values={item.quote?.spark ?? []} china={isChinaItem(item)} />
+                  </button>
+                </td>
                 <td class="notecell">
                   {#if item.notes}
                     <button class="note" onclick={() => editNote(item)} title={item.notes}>{item.notes}</button>
@@ -584,6 +599,8 @@
     {alerts}
     onchanged={() => load(true)}
   />
+
+  <PriceObservationModal bind:open={obsOpen} item={obsItem} />
 
   <ConfirmModal
     bind:open={confirmDeleteList}
@@ -771,6 +788,27 @@
   .sparkcell {
     padding-top: var(--space-1);
     padding-bottom: var(--space-1);
+  }
+  /* The whole 30-day trend cell is the observation-modal affordance. Button keeps the
+     same box as the plain Sparkline so the row height never changes. */
+  .sparkbtn {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    height: 30px;
+  }
+  .sparkbtn:hover :global(.spark) {
+    outline: 1px solid var(--border-control);
+    outline-offset: 1px;
+  }
+  .sparkbtn:focus-visible :global(.spark) {
+    outline: 1.5px solid var(--accent);
+    outline-offset: 1px;
   }
   /* Fixed-width column: a long note wraps to 2 lines then ellipsises (full text in the
      native tooltip), so neither the column nor the row height follows the content. */

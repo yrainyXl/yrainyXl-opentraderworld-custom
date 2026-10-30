@@ -5,6 +5,7 @@
 //! workspace as stubs and fleshed out in later phases.
 
 mod agent;
+mod agent_access;
 mod agent_api;
 mod align;
 mod automator;
@@ -23,6 +24,7 @@ mod dashboard_api;
 mod demo;
 mod demo_seed;
 mod log_layer;
+mod market;
 mod settings_api;
 mod network_api;
 mod databases;
@@ -351,6 +353,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup", post(setup_admin))
         .route("/api/login", post(login))
+        // External-agent probe: authenticated by its own bearer API token, not the
+        // session cookie. Mounted here so the session middleware never sees it; the
+        // handler performs every check (see `agent_access`).
+        .route("/api/agent/ping", get(agent_access::ping))
         // Inbound webhooks (many senders can't set auth headers): the URL token is the
         // credential, checked in the handler. Body capped — payloads are tiny messages.
         .route(

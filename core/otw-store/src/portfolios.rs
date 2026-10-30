@@ -13,6 +13,7 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::journal_fx;
+use crate::market_quotes;
 
 // ── Row types ────────────────────────────────────────────────────────────────
 
@@ -544,14 +545,73 @@ pub(crate) async fn position_usd(
     }))
 }
 
+/// Default pricing identity of an asset: `(provider, provider_id)` — the key the shared
+/// `market_quotes` cache is written under. An asset with a `spot_provider` override prices
+/// through that source instead, which the shared cache does not cover, so it keeps its own
+/// `last_price_usd` (the Portfolio refresh persists it).
+fn asset_default_key(asset: &Asset) -> Option<(String, String)> {
+    if asset.spot_provider.is_some() {
+        None
+    } else {
+        Some((asset.provider.clone(), asset.provider_id.clone()))
+    }
+}
+
+/// Pick the current USD price to value an asset with: the shared Market Quote when it is
+/// at least as fresh as the asset's own `last_price_usd`/`last_price_at`, otherwise the
+/// locally persisted last price. This is what lets one "current market price" flow into
+/// Portfolio (and Research) regardless of which module refreshed it last.
+pub fn pick_price_usd(
+    asset: &Asset,
+    market: Option<&market_quotes::MarketQuote>,
+) -> Option<(f64, OffsetDateTime)> {
+    let local = asset.last_price_usd.map(|p| (p, asset.last_price_at));
+    let shared = market
+        .filter(|m| m.price_usd > 0.0)
+        .map(|m| (m.price_usd, m.quote_at));
+    match (local, shared) {
+        (None, None) => None,
+        (Some((p, at)), None) => Some((p, at.unwrap_or_else(OffsetDateTime::now_utc))),
+        (None, Some(s)) => Some(s),
+        (Some((lp, la)), Some((sp, sa))) => {
+            // Prefer whichever side carries the newer observation time.
+            let shared_newer = match la {
+                Some(lt) => sa >= lt,
+                None => true,
+            };
+            if shared_newer {
+                Some((sp, sa))
+            } else {
+                Some((lp, la.unwrap_or(sa)))
+            }
+        }
+    }
+}
+
 /// Build the computed view for one asset, converting USD figures to `currency` on `date`.
+/// `quote_override` is the resolved current price (USD, observation time) for the asset's
+/// default identity — `None` keeps the asset's own persisted `last_price_usd`. Passing an
+/// owned tuple keeps every future in this module free of borrowed-across-await state.
 pub(crate) async fn asset_view(
     pool: &PgPool,
     asset: Asset,
     ops: &[Operation],
     currency: &str,
     date: Date,
+    quote_override: Option<(f64, OffsetDateTime)>,
 ) -> anyhow::Result<AssetView> {
+    // Surface whichever price source won as the row's own (computed) price fields, so the
+    // serialized view carries the fresh USD price and its observation time unchanged.
+    let asset = match quote_override {
+        Some((p, at)) => {
+            let mut a = asset;
+            a.last_price_usd = Some(p);
+            a.last_price_at = Some(at);
+            a
+        }
+        None => asset,
+    };
+
     let (qty, basis_usd, realized_usd) = position_usd(pool, ops, &asset.currency).await?;
     let conv = |usd: f64| async move { journal_fx::convert(pool, usd, "USD", currency, date).await };
 
@@ -581,13 +641,37 @@ pub(crate) async fn asset_view(
 }
 
 /// Computed views for every asset in a portfolio (in the portfolio's currency, today's FX).
+/// Each asset values at the fresher of its shared Market Quote and its own last price.
 pub async fn asset_views(pool: &PgPool, pf: &Portfolio) -> anyhow::Result<Vec<AssetView>> {
     let today = OffsetDateTime::now_utc().date();
     let assets = list_assets(pool, pf.id).await?;
+    // Load the shared quotes for every default-priced identity in one round-trip, then
+    // resolve the winning price per asset up front (pure computation, no awaits) so the
+    // per-asset futures below hold owned data only.
+    let mut seen = std::collections::HashSet::new();
+    let keys: Vec<(String, String)> = assets
+        .iter()
+        .filter_map(asset_default_key)
+        .filter(|k| seen.insert(k.clone()))
+        .collect();
+    let quotes = market_quotes::get_many(pool, &keys).await?;
+    let by_key: std::collections::HashMap<(String, String), market_quotes::MarketQuote> = quotes
+        .into_iter()
+        .map(|q| ((q.provider.clone(), q.provider_id.clone()), q))
+        .collect();
+    let overrides: std::collections::HashMap<uuid::Uuid, (f64, OffsetDateTime)> = assets
+        .iter()
+        .filter_map(|a| {
+            let market = asset_default_key(a).and_then(|k| by_key.get(&k));
+            pick_price_usd(a, market).map(|(p, at)| (a.id, (p, at)))
+        })
+        .collect();
+
     let mut out = Vec::with_capacity(assets.len());
     for a in assets {
         let ops = list_operations(pool, a.id).await?;
-        out.push(asset_view(pool, a, &ops, &pf.currency, today).await?);
+        let override_q = overrides.get(&a.id).copied();
+        out.push(asset_view(pool, a, &ops, &pf.currency, today, override_q).await?);
     }
     Ok(out)
 }
@@ -813,5 +897,78 @@ mod position_tests {
         near(qty, 0.0);
         near(basis, 0.0);
         near(realized, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod quote_pick_tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn asset(last: Option<(f64, OffsetDateTime)>, override_p: Option<&str>) -> Asset {
+        let (last_price_usd, last_price_at) = match last {
+            Some((p, at)) => (Some(p), Some(at)),
+            None => (None, None),
+        };
+        Asset {
+            id: Uuid::new_v4(),
+            portfolio_id: Uuid::new_v4(),
+            asset_class: "stock".into(),
+            provider: "yahoo".into(),
+            provider_id: "AAPL".into(),
+            symbol: "AAPL".into(),
+            name: "Apple".into(),
+            currency: "USD".into(),
+            last_price_usd,
+            last_price_at,
+            spot_provider: override_p.map(str::to_string),
+            spot_symbol: String::new(),
+            recon_status: "ok".into(),
+            recon_checked_at: None,
+            recon_note: String::new(),
+        }
+    }
+
+    fn quote(price: f64, at: OffsetDateTime) -> market_quotes::MarketQuote {
+        market_quotes::MarketQuote {
+            provider: "yahoo".into(),
+            provider_id: "AAPL".into(),
+            price_usd: price,
+            currency: "USD".into(),
+            quote_at: at,
+        }
+    }
+
+    #[test]
+    fn shared_quote_wins_when_newer() {
+        let a = asset(Some((10.0, datetime!(2026-09-01 0:00 UTC))), None);
+        let (p, _) = pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-02 0:00 UTC)))).unwrap();
+        assert_eq!(p, 12.0);
+    }
+
+    #[test]
+    fn stale_shared_quote_keeps_last_price() {
+        let a = asset(Some((10.0, datetime!(2026-09-02 0:00 UTC))), None);
+        let (p, _) = pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-01 0:00 UTC)))).unwrap();
+        assert_eq!(p, 10.0);
+    }
+
+    #[test]
+    fn missing_shared_quote_falls_back_to_last_price() {
+        let a = asset(Some((10.0, datetime!(2026-09-01 0:00 UTC))), None);
+        let (p, _) = pick_price_usd(&a, None).unwrap();
+        assert_eq!(p, 10.0);
+        assert!(pick_price_usd(&asset(None, None), None).is_none());
+    }
+
+    #[test]
+    fn spot_override_assets_have_no_default_identity() {
+        // An asset priced through an exchange override has no default identity in the
+        // shared cache — asset_views must never hand it a default-provider market row
+        // (this guard is what keeps the override priced by its own source).
+        let a = asset(Some((10.0, datetime!(2026-09-02 0:00 UTC))), Some("binance"));
+        assert_eq!(asset_default_key(&a), None);
+        let (p, _) = pick_price_usd(&a, None).unwrap();
+        assert_eq!(p, 10.0);
     }
 }

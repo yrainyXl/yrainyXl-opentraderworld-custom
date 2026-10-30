@@ -8,7 +8,7 @@
   import Icon from '$lib/ui/Icon.svelte';
   import { t } from '$lib/i18n';
   import { goto } from '$app/navigation';
-  import { featureModules } from '$lib/modules/registry';
+  import { featureModules, moduleLabel } from '$lib/modules/registry';
   import { installedIds } from '$lib/modules/installed.js';
   import { redirectIfUnauthorized } from '$lib/auth.js';
 
@@ -62,9 +62,9 @@
     if (!nq) return [];
     return featureModules
       .filter((m) => ($installedIds ? $installedIds.has(m.id) : true))
-      .filter((m) => m.name.toLowerCase().includes(nq))
+      .filter((m) => moduleLabel(m, $t).toLowerCase().includes(nq))
       .slice(0, 8)
-      .map((m) => ({ type: 'module', name: m.name, target: m.base, icon: m.icon }));
+      .map((m) => ({ type: 'module', name: moduleLabel(m, $t), target: m.base, icon: m.icon }));
   });
   const settingHits = $derived.by(() => {
     if (!nq) return [];

@@ -2,9 +2,11 @@
 //!
 //! Research documents (linked from `investment_cases.document_id`) get extra
 //! guards here: ownership of the linked case must match the authenticated user
-//! (GET/PATCH/DELETE), and deleting a referenced document returns HTTP 409 —
-//! both pre-checked at the application layer AND mapped from the FK violation
-//! (23503) as the final race protection, never a raw 500.
+//! (GET/PATCH/DELETE). The link is a detachable reference, not a required
+//! existence: deleting a referenced document succeeds and the case link is set
+//! to NULL by the FK (ON DELETE SET NULL) — the case and its decision/change
+//! records stay untouched. FK violations (23503) from other future RESTRICT
+//! references are still mapped to a clean 409, never a raw 500.
 
 use axum::{
     extract::{Path, State},
@@ -182,23 +184,20 @@ async fn set_flag(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// DELETE /api/documents/{id} — delete (cascades to children).
+/// DELETE /api/documents/{id} — delete (cascades to children). When the
+/// document is the research page of an investment case, the case link is
+/// detached (document_id → NULL) rather than blocking the delete.
 async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<otw_store::User>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     research_guard(&state, user.id, id).await?;
-    // Research documents referenced by an investment case cannot be deleted:
-    // pre-check for a clear 409 before touching the DB.
-    if let Some(_case) = otw_store::investment_cases::find_case_by_document_id(&state.pool, id)
-        .await?
-    {
-        return Err(ApiError::conflict(
-            "document is referenced by an investment case; delete the case first",
-        ));
-    }
-    // FK violation (23503) as the final race protection — map to 409, never 500.
+    // Deleting a case-linked research page is allowed: the FK (ON DELETE
+    // SET NULL) detaches the case's document_id, keeping the case and its
+    // decision/change records intact. No pre-check here anymore.
+    // FK violations (23503) from other RESTRICT references are still mapped to
+    // a clean 409 as the final race protection — never a raw 500.
     let result = otw_store::documents::delete(&state.pool, id).await;
     let ok = match result {
         Ok(ok) => ok,

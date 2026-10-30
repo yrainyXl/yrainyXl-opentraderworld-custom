@@ -525,6 +525,24 @@ MCP 是：
 - 删除：必须明确确认
 - Secrets / Network / Data wipe：禁止 AI
 
+**Phase 1 补充（C-016）：外部 Agent 的独立 REST 认证层**
+
+在 MCP 之前先增加一层最小验证能力：`GET /api/agent/ping` 使用独立的
+`agent_api_tokens`（绑定 `users.id`、携带 `agent` 主体标签与 `scopes`、支持过期/撤销、
+只存 SHA-256）。它只用于验证「外部 AI 能否用独立 Token 访问 OTW API」，不是新的交易
+通道，也不复用浏览器 session。
+
+三类凭据必须长期保持隔离，不得互相接受：
+
+```text
+浏览器 session   cookie otw_session      表 sessions          仅 Web UI
+MCP token        前缀 otw_mcp_            表 mcp_tokens        仅 /api/mcp
+Agent API token  前缀 otw_agent_          表 agent_api_tokens  仅 /api/agent/*
+```
+
+后续把 Agent API 扩展为查询持仓/订单或提交模拟交易时，仍必须遵守本节的模块权限与
+确认原则；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
+
 不要因为 AI 能访问数据库，就绕过 OTW 原有 API / 权限模型。
 
 ## 6.3 Skills

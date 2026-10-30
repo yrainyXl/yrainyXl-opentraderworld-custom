@@ -3,7 +3,7 @@
   // dashboard) or detach (hide it). Detaching can optionally delete all of the module's
   // data. Installing/detaching only flips a visibility flag — nothing is downloaded.
   import { onMount } from 'svelte';
-  import { featureModules } from '$lib/modules/registry';
+  import { featureModules, moduleLabel } from '$lib/modules/registry';
   import { installedIds, ensureInstalled, installModule, detachModule } from '$lib/modules/installed.js';
   import Icon from '$lib/ui/Icon.svelte';
   import { t } from '$lib/i18n';
@@ -91,7 +91,7 @@
         <li class:installed={isInstalled(m.id)}>
           <span class="ico"><Icon name={m.icon} size={17} /></span>
           <span class="label">
-            <span class="name">{m.name}</span>
+            <span class="name">{moduleLabel(m, $t)}</span>
             {#if m.descKey}<span class="desc">{$t(m.descKey)}</span>{/if}
           </span>
           {#if isInstalled(m.id)}
@@ -116,17 +116,17 @@
       class="dialog"
       role="dialog"
       aria-modal="true"
-      aria-label={$t('settings.modules.detachTitle', { name: detaching.name })}
+      aria-label={$t('settings.modules.detachTitle', { name: moduleLabel(detaching, $t) })}
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.key === 'Escape' && (detaching = null)}
     >
-      <h3>{$t('settings.modules.detachConfirmTitle', { name: detaching.name })}</h3>
-      <p class="muted small">{$t('settings.modules.detachConfirmBody', { name: detaching.name })}</p>
+      <h3>{$t('settings.modules.detachConfirmTitle', { name: moduleLabel(detaching, $t) })}</h3>
+      <p class="muted small">{$t('settings.modules.detachConfirmBody', { name: moduleLabel(detaching, $t) })}</p>
       <label class="check">
         <input type="checkbox" bind:checked={wipeData} />
         <span>
-          {$t('settings.modules.alsoDelete', { name: detaching.name })}
+          {$t('settings.modules.alsoDelete', { name: moduleLabel(detaching, $t) })}
           <span class="muted small block">{$t('settings.modules.deleteWarn')}</span>
         </span>
       </label>
