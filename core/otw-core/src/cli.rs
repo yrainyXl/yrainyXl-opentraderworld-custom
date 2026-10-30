@@ -59,6 +59,14 @@ pub enum Command {
     },
     ListAgentTokens { username: String },
     RevokeAgentToken { id: Uuid },
+    CreateOauthClient {
+        name: String,
+        redirect_uris: Vec<String>,
+        scopes: Vec<String>,
+    },
+    ListOauthClients,
+    DeleteOauthClient { client_id: String },
+    RevokeOauthGrants { username: String },
 }
 
 /// Read a command off argv, or `None` when this is an ordinary server start.
@@ -89,6 +97,10 @@ pub fn from_args() -> Option<Command> {
         "create-agent-token" => parse_create_agent_token(args),
         "list-agent-tokens" => parse_list_agent_tokens(args),
         "revoke-agent-token" => parse_revoke_agent_token(args),
+        "create-oauth-client" => parse_create_oauth_client(args),
+        "list-oauth-clients" => parse_list_oauth_clients(args),
+        "delete-oauth-client" => parse_delete_oauth_client(args),
+        "revoke-oauth-grants" => parse_revoke_oauth_grants(args),
         _ => None,
     }
 }
@@ -190,6 +202,82 @@ fn parse_revoke_agent_token(mut args: impl Iterator<Item = String>) -> Option<Co
     }
 }
 
+fn parse_create_oauth_client(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    let mut name: Option<String> = None;
+    let mut redirect_uris: Vec<String> = Vec::new();
+    let mut scopes: Vec<String> = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--redirect-uri" => redirect_uris.push(next_value(&mut args, "--redirect-uri")),
+            "--scope" => scopes.push(next_value(&mut args, "--scope")),
+            other if other.starts_with('-') => usage(&format!("unknown option `{other}`")),
+            other if name.is_some() => usage(&format!("unexpected argument `{other}`")),
+            other => name = Some(other.to_string()),
+        }
+    }
+    let name = name.unwrap_or_else(|| usage("create-oauth-client needs a client name"));
+    if redirect_uris.is_empty() {
+        usage("create-oauth-client needs at least one --redirect-uri");
+    }
+    if scopes.is_empty() {
+        scopes = vec![
+            otw_store::oauth::SCOPE_MCP_READ.to_string(),
+            otw_store::oauth::SCOPE_OFFLINE_ACCESS.to_string(),
+        ];
+    }
+    for scope in &scopes {
+        if !otw_store::oauth::SUPPORTED_SCOPES.contains(&scope.as_str()) {
+            usage(&format!(
+                "unsupported OAuth scope `{scope}` (supported: {})",
+                otw_store::oauth::SUPPORTED_SCOPES.join(", ")
+            ));
+        }
+    }
+    for uri in &redirect_uris {
+        if !crate::oauth::valid_redirect_uri(uri) {
+            usage(&format!(
+                "invalid redirect URI `{uri}` (HTTPS, or HTTP on localhost/127.0.0.1; no fragments/userinfo)"
+            ));
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    Some(Command::CreateOauthClient { name, redirect_uris, scopes })
+}
+
+fn parse_list_oauth_clients(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    if let Some(extra) = args.next() {
+        usage(&format!("unexpected argument `{extra}`"));
+    }
+    Some(Command::ListOauthClients)
+}
+
+fn parse_delete_oauth_client(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    match args.next() {
+        Some(client_id) if !client_id.starts_with('-') => {
+            if let Some(extra) = args.next() {
+                usage(&format!("unexpected argument `{extra}`"));
+            }
+            Some(Command::DeleteOauthClient { client_id })
+        }
+        Some(other) => usage(&format!("unexpected argument `{other}`")),
+        None => usage("delete-oauth-client needs a client_id"),
+    }
+}
+
+fn parse_revoke_oauth_grants(mut args: impl Iterator<Item = String>) -> Option<Command> {
+    match args.next() {
+        Some(username) if !username.starts_with('-') => {
+            if let Some(extra) = args.next() {
+                usage(&format!("unexpected argument `{extra}`"));
+            }
+            Some(Command::RevokeOauthGrants { username })
+        }
+        Some(other) => usage(&format!("unexpected argument `{other}`")),
+        None => usage("revoke-oauth-grants needs a username"),
+    }
+}
+
 /// Print usage and exit. Never returns.
 fn usage(problem: &str) -> ! {
     eprintln!("otw-core: {problem}\n");
@@ -205,6 +293,13 @@ fn usage(problem: &str) -> ! {
     eprintln!("      default scope: agent:ping; --expires-in-days 0 = never expires");
     eprintln!("  list-agent-tokens <username>        list token metadata (never the token)");
     eprintln!("  revoke-agent-token <id>             revoke one token by id");
+    eprintln!();
+    eprintln!("MCP OAuth clients (pre-registration; ChatGPT can also use dynamic registration):");
+    eprintln!("  create-oauth-client <name> --redirect-uri <uri> [--redirect-uri <uri>] [--scope <scope>]");
+    eprintln!("      supported scopes: {}", otw_store::oauth::SUPPORTED_SCOPES.join(", "));
+    eprintln!("  list-oauth-clients                  list registered OAuth clients");
+    eprintln!("  delete-oauth-client <client_id>     delete a client and revoke its grants");
+    eprintln!("  revoke-oauth-grants <username>      revoke every OAuth token for an account");
     std::process::exit(2);
 }
 
@@ -232,6 +327,18 @@ pub async fn run(cmd: Command, database_url: &str) -> anyhow::Result<()> {
         }
         Command::ListAgentTokens { username } => list_agent_tokens(&pool, &username).await,
         Command::RevokeAgentToken { id } => revoke_agent_token(&pool, id).await,
+        Command::CreateOauthClient {
+            name,
+            redirect_uris,
+            scopes,
+        } => create_oauth_client(&pool, &name, &redirect_uris, &scopes).await,
+        Command::ListOauthClients => list_oauth_clients(&pool).await,
+        Command::DeleteOauthClient { client_id } => {
+            delete_oauth_client(&pool, &client_id).await
+        }
+        Command::RevokeOauthGrants { username } => {
+            revoke_oauth_grants(&pool, &username).await
+        }
     }
 }
 
@@ -416,6 +523,102 @@ async fn list_agent_tokens(pool: &PgPool, username: &str) -> anyhow::Result<()> 
             status
         );
     }
+    Ok(())
+}
+
+async fn create_oauth_client(
+    pool: &PgPool,
+    name: &str,
+    redirect_uris: &[String],
+    scopes: &[String],
+) -> anyhow::Result<()> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        anyhow::bail!("OAuth client name must be 1-100 characters");
+    }
+    let (row, client_id) =
+        otw_store::oauth::create_client(pool, name, redirect_uris, scopes, "pre_registered")
+            .await?;
+    if let Err(e) = otw_store::logs::insert(
+        pool,
+        "info",
+        "otw_core::cli",
+        &format!(
+            "OAuth client registered from the host CLI (client_id {}, name '{}')",
+            row.client_id, row.client_name
+        ),
+    )
+    .await
+    {
+        eprintln!("warning: the client was created but the audit log entry failed: {e:#}");
+    }
+    println!("OAuth client registered: {}", row.client_name);
+    println!("  client_id:     {client_id}");
+    println!("  redirect_uris: {}", row.redirect_uris.join(", "));
+    println!("  scopes:        {}", row.scopes.join(", "));
+    println!("  auth method:   {} (public client; PKCE required)", row.token_endpoint_auth_method);
+    Ok(())
+}
+
+async fn list_oauth_clients(pool: &PgPool) -> anyhow::Result<()> {
+    let clients = otw_store::oauth::list_clients(pool).await?;
+    if clients.is_empty() {
+        println!("No OAuth clients registered.");
+        return Ok(());
+    }
+    for c in clients {
+        let status = if c.is_disabled() { "disabled" } else { "active" };
+        println!(
+            "  {}  name={}  redirect_uris=[{}]  scopes=[{}]  source={}  created={}  status={}",
+            c.client_id,
+            c.client_name,
+            c.redirect_uris.join(", "),
+            c.scopes.join(", "),
+            c.source,
+            fmt_time(c.created_at),
+            status
+        );
+    }
+    Ok(())
+}
+
+async fn delete_oauth_client(pool: &PgPool, client_id: &str) -> anyhow::Result<()> {
+    if !otw_store::oauth::delete_client(pool, client_id).await? {
+        anyhow::bail!("no OAuth client with client_id `{client_id}`");
+    }
+    if let Err(e) = otw_store::logs::insert(
+        pool,
+        "warn",
+        "otw_core::cli",
+        &format!("OAuth client deleted from the host CLI (client_id {client_id})"),
+    )
+    .await
+    {
+        eprintln!("warning: the client was deleted but the audit log entry failed: {e:#}");
+    }
+    println!("Deleted OAuth client {client_id}; its tokens, codes and pending requests are gone.");
+    Ok(())
+}
+
+async fn revoke_oauth_grants(pool: &PgPool, username: &str) -> anyhow::Result<()> {
+    let user = otw_store::find_user_by_username(pool, username.trim())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no account named `{username}`"))?;
+    otw_store::oauth::revoke_all_for_user(pool, user.id).await?;
+    if let Err(e) = otw_store::logs::insert(
+        pool,
+        "warn",
+        "otw_core::cli",
+        &format!(
+            "all OAuth grants revoked from the host CLI for account '{}'",
+            user.username
+        ),
+    )
+    .await
+    {
+        eprintln!("warning: the grants were revoked but the audit log entry failed: {e:#}");
+    }
+    println!("Revoked every OAuth access/refresh token for '{}'.", user.username);
     Ok(())
 }
 

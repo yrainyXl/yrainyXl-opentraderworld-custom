@@ -276,6 +276,11 @@ DATABASE_URL=${DATABASE_URL}
 # ── Auth ──
 SESSION_SECRET=${SESSION_SECRET}
 
+# ── MCP OAuth ──
+# Public origin used to mint OAuth discovery/resource URLs. HTTPS in web/LAN+HTTPS
+# modes; local HTTP remains valid only for loopback (OAuth is disabled otherwise).
+OTW_PUBLIC_BASE_URL=${APP_URL}
+
 # ── Secrets encryption (feed API keys/tokens) ──
 # Master key for AEAD encryption at rest. Keep stable; rotating invalidates
 # previously stored feed secrets.

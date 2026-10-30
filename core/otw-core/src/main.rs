@@ -62,6 +62,7 @@ mod mportfolios_api;
 mod mportfolios_job;
 mod notif_channels_api;
 mod notif_send;
+mod oauth;
 mod portfolios;
 mod portfolios_api;
 mod portfolios_import;
@@ -177,6 +178,10 @@ pub struct AppState {
     /// Backtest parameter grids: the last few optimization jobs, running or finished. In memory
     /// on purpose — a sweep is an exploration, the run history is where a result is kept.
     pub optimizer: std::sync::Arc<backtest::optimize::Jobs>,
+    /// Public HTTPS origin for OAuth discovery/resource URLs. Set from
+    /// `OTW_PUBLIC_BASE_URL`; `None` disables the OAuth authorization server. Never derived
+    /// from Host/X-Forwarded-* headers.
+    pub public_base_url: Option<String>,
 }
 
 #[tokio::main]
@@ -258,6 +263,20 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // OAuth housekeeping: expired consent requests and authorization codes are dead
+    // weight. Run hourly; failures are non-fatal.
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = otw_store::oauth::cleanup(&pool).await {
+                    tracing::debug!("oauth cleanup failed: {e:#}");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
+
     let upload_dir = std::path::PathBuf::from(
         std::env::var("OTW_UPLOAD_DIR").unwrap_or_else(|_| "/data/uploads".to_string()),
     );
@@ -331,6 +350,27 @@ async fn main() -> anyhow::Result<()> {
     // Live market data: ref-counted WS feeds, started on demand when a chart opens a stream.
     let live = live::hub::LiveHub::new(pool.clone(), http.clone(), cipher.clone());
 
+    // External origin for OAuth discovery/resource URLs. Config only — Host and
+    // X-Forwarded-* are attacker-controlled and must never mint security URLs.
+    let public_base_url = match std::env::var("OTW_PUBLIC_BASE_URL") {
+        Ok(raw) if !raw.trim().is_empty() => match oauth::parse_public_base(&raw) {
+            Some(base) => {
+                tracing::info!("oauth public base url: {base}");
+                Some(base)
+            }
+            None => {
+                tracing::error!(
+                    "OTW_PUBLIC_BASE_URL is invalid (need https://origin, or http://loopback); OAuth disabled"
+                );
+                None
+            }
+        },
+        _ => {
+            tracing::warn!("OTW_PUBLIC_BASE_URL is not set; MCP OAuth is disabled (fixed MCP tokens still work)");
+            None
+        }
+    };
+
     let state = AppState {
         pool,
         upload_dir,
@@ -343,6 +383,7 @@ async fn main() -> anyhow::Result<()> {
         live,
         submit_limiter: community_docs_api::SubmitLimiter::new(),
         optimizer: std::sync::Arc::new(backtest::optimize::Jobs::new()),
+        public_base_url,
     };
 
     // Public routes: health and the auth handshake (setup + login). Everything else is
@@ -357,6 +398,9 @@ async fn main() -> anyhow::Result<()> {
         // session cookie. Mounted here so the session middleware never sees it; the
         // handler performs every check (see `agent_access`).
         .route("/api/agent/ping", get(agent_access::ping))
+        // OAuth discovery + authorization endpoints. They are public in the Axum sense;
+        // the authorization handlers enforce the OTW session and admin ownership.
+        .merge(oauth::public_routes())
         // Inbound webhooks (many senders can't set auth headers): the URL token is the
         // credential, checked in the handler. Body capped — payloads are tiny messages.
         .route(
@@ -409,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(vault_api::routes())
         .merge(mcp_api::routes())
         .merge(agent_api::routes())
+        .merge(oauth::routes())
         .merge(webhooks_api::routes())
         .merge(mailbox_api::routes())
         .merge(automator_api::routes())

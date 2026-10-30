@@ -55,13 +55,29 @@ pub async fn call(
     path: &str,
     body: Option<Value>,
 ) -> anyhow::Result<(StatusCode, String)> {
+    call_as(state, method, path, body, None).await
+}
+
+/// Same dispatch, but with an explicit principal. The MCP gateway passes the OAuth token's
+/// user here so handlers see a real authenticated account instead of always seeing admin.
+/// `None` keeps the legacy internal-caller behavior (admin impersonation).
+pub async fn call_as(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    user: Option<&otw_store::User>,
+) -> anyhow::Result<(StatusCode, String)> {
     let router = DISPATCH
         .get()
         .ok_or_else(|| anyhow::anyhow!("internal dispatch router not initialized"))?
         .clone();
-    let user = otw_store::find_admin(&state.pool)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no admin user"))?;
+    let user = match user {
+        Some(u) => u.clone(),
+        None => otw_store::find_admin(&state.pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no admin user"))?,
+    };
 
     let bytes = match &body {
         // Some MCP clients send the body pre-serialized as a JSON string; pass it through

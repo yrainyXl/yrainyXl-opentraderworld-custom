@@ -39,6 +39,7 @@ pub mod mcp;
 pub mod mindset;
 pub mod mportfolios;
 pub mod notif_channels;
+pub mod oauth;
 pub mod portfolios;
 pub mod portfolios_import;
 pub mod prompts;
@@ -265,6 +266,9 @@ pub async fn update_credentials(
             .execute(pool)
             .await
             .context("revoking sessions after password change")?;
+        // A password change is a credential reset: OAuth refresh tokens derived from the
+        // old account state must not survive it.
+        crate::oauth::revoke_all_for_user(pool, user_id).await?;
     }
     Ok(())
 }
@@ -294,6 +298,7 @@ pub async fn reset_password(
         .execute(pool)
         .await
         .context("revoking sessions after password reset")?;
+    crate::oauth::revoke_all_for_user(pool, user_id).await?;
     Ok(())
 }
 

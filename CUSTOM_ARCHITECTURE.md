@@ -536,9 +536,26 @@ MCP 是：
 
 ```text
 浏览器 session   cookie otw_session      表 sessions          仅 Web UI
-MCP token        前缀 otw_mcp_            表 mcp_tokens        仅 /api/mcp
+MCP token        前缀 otw_mcp_            表 mcp_tokens        仅 /api/mcp（固定 Token，兼容本地 Codex）
+MCP OAuth token  前缀 otw_oat_/otw_ort_   表 oauth_*           仅 /api/mcp（ChatGPT 等 OAuth 客户端）
 Agent API token  前缀 otw_agent_          表 agent_api_tokens  仅 /api/agent/*
 ```
+
+**Phase 1 补充（C-017）：MCP OAuth 2.1 授权服务器**
+
+OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource Server：
+
+- 发现：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`；
+- 流程：Authorization Code + 强制 PKCE S256 + consent；DCR 与 host CLI 预注册；
+- Token：不透明 256-bit，数据库只存 SHA-256；access 15 分钟，refresh 30 天轮换，
+  重放会撤销整族；
+- 权限：OAuth 只具备 `mcp:read`，MCP 只暴露 `otw_catalog`/`otw_read`；写入、删除、
+  交易、`otw_compute` 一律拒绝；
+- 用户：OAuth 绑定真实 `users.id`，但当前业务表是单用户模型，因此 authorize 只允许
+  admin（owner）；**不得宣称已实现多用户或投资组合隔离**。若未来要支持限定组合，必须
+  在业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
+- 外部地址：只通过 `OTW_PUBLIC_BASE_URL` 配置，禁止从 Host / X-Forwarded-* 生成安全 URL。
+- 固定 `otw_mcp_` Token 保留，作为本地 Codex 兼容路径。
 
 后续把 Agent API 扩展为查询持仓/订单或提交模拟交易时，仍必须遵守本节的模块权限与
 确认原则；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。

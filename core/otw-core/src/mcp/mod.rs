@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use axum::{
     body::Bytes,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json, Router,
 };
@@ -77,6 +77,229 @@ fn record_auth_failure() {
         Some((start, n)) if start.elapsed() < AUTH_FAIL_WINDOW => Some((start, n + 1)),
         _ => Some((Instant::now(), 1)),
     };
+}
+
+/// A bearer credential accepted by the MCP endpoint.
+///
+/// Fixed `otw_mcp_` tokens keep the pre-existing behavior: module permissions as stored
+/// and the admin principal for in-process dispatch. OAuth access tokens are bound to a
+/// real OTW user and are always read-only (`mcp:read`), regardless of what the client asks
+/// for.
+pub struct Principal {
+    pub name: String,
+    pub permissions: Value,
+    pub user: otw_store::User,
+    pub oauth: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Challenge {
+    /// Missing credential: RFC 6750 says no `error` parameter.
+    None,
+    InvalidToken,
+    InsufficientScope,
+}
+
+struct AuthError {
+    status: StatusCode,
+    message: &'static str,
+    challenge: Challenge,
+}
+
+impl AuthError {
+    fn invalid() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "invalid or missing bearer token",
+            challenge: Challenge::InvalidToken,
+        }
+    }
+    fn expired(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message,
+            challenge: Challenge::InvalidToken,
+        }
+    }
+    fn revoked() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "this OAuth access token has been revoked",
+            challenge: Challenge::InvalidToken,
+        }
+    }
+    fn invalid_audience() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "access token audience mismatch",
+            challenge: Challenge::InvalidToken,
+        }
+    }
+    fn insufficient_scope() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "OAuth access token lacks the mcp:read scope",
+            challenge: Challenge::InsufficientScope,
+        }
+    }
+    fn not_permitted() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "OAuth subject is not permitted (admin account required)",
+            challenge: Challenge::None,
+        }
+    }
+    fn oauth_unavailable() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "OAuth is not configured on this server",
+            challenge: Challenge::None,
+        }
+    }
+    fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "internal error",
+            challenge: Challenge::None,
+        }
+    }
+}
+
+fn looks_like_any_token(token: &str) -> bool {
+    looks_like_token(token) || otw_store::oauth::looks_like_access_token(token)
+}
+
+/// Read-only module permissions for an OAuth principal: every catalog module at level
+/// `"r"`. The existing permission checks then hide every write/delete endpoint and the
+/// `otw_write`/`otw_compute` tools; the explicit guards below are defense in depth.
+fn read_only_permissions() -> Value {
+    let mut map = serde_json::Map::new();
+    for (module, _) in catalog::MODULES {
+        map.insert((*module).to_string(), Value::String("r".into()));
+    }
+    Value::Object(map)
+}
+
+fn challenge_header(state: &AppState, challenge: Challenge) -> Option<HeaderValue> {
+    let base = state.public_base_url.as_deref()?;
+    let mut value = format!(
+        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\", scope=\"mcp:read\""
+    );
+    match challenge {
+        Challenge::None => {}
+        Challenge::InvalidToken => value.push_str(", error=\"invalid_token\""),
+        Challenge::InsufficientScope => value.push_str(", error=\"insufficient_scope\""),
+    }
+    HeaderValue::from_str(&value).ok()
+}
+
+fn auth_error_response(state: &AppState, err: AuthError) -> Response {
+    let mut resp = (err.status, Json(json!({ "error": err.message }))).into_response();
+    if let Some(value) = challenge_header(state, err.challenge) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    }
+    resp
+}
+
+/// Resolve a bearer to a principal. Fixed tokens are tried first (their shape is
+/// unambiguous); OAuth access tokens use the `otw_oat_` prefix. Anything else is invalid.
+async fn authenticate(state: &AppState, token: &str) -> Result<Principal, AuthError> {
+    if looks_like_token(token) {
+        let row = otw_store::mcp::find_by_token(&state.pool, token)
+            .await
+            .map_err(|e| {
+                tracing::error!("mcp auth lookup failed: {e:#}");
+                AuthError::internal()
+            })?;
+        let Some(row) = row else {
+            record_auth_failure();
+            return Err(AuthError::invalid());
+        };
+        if row.is_expired() {
+            return Err(AuthError::expired(
+                "this MCP token has expired; mint a new one in Settings → AI agents",
+            ));
+        }
+        let user = otw_store::find_admin(&state.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("mcp auth: admin lookup failed: {e:#}");
+                AuthError::internal()
+            })?
+            .ok_or_else(AuthError::internal)?;
+        return Ok(Principal {
+            name: row.name,
+            permissions: row.permissions,
+            user,
+            oauth: false,
+        });
+    }
+
+    if otw_store::oauth::looks_like_access_token(token) {
+        return authenticate_oauth(state, token).await;
+    }
+
+    record_auth_failure();
+    Err(AuthError::invalid())
+}
+
+async fn authenticate_oauth(state: &AppState, token: &str) -> Result<Principal, AuthError> {
+    let Some(base) = state.public_base_url.as_deref() else {
+        return Err(AuthError::oauth_unavailable());
+    };
+    let row = otw_store::oauth::find_access_token(&state.pool, token)
+        .await
+        .map_err(|e| {
+            tracing::error!("mcp oauth lookup failed: {e:#}");
+            AuthError::internal()
+        })?;
+    let Some(row) = row else {
+        record_auth_failure();
+        return Err(AuthError::invalid());
+    };
+    if row.is_revoked() {
+        return Err(AuthError::revoked());
+    }
+    if row.is_expired() {
+        return Err(AuthError::expired("this OAuth access token has expired"));
+    }
+    if row.client_disabled_at.is_some() {
+        return Err(AuthError::invalid());
+    }
+    let expected_resource = format!("{base}/api/mcp");
+    if row.resource != expected_resource {
+        return Err(AuthError::invalid_audience());
+    }
+    if !row.has_scope(otw_store::oauth::SCOPE_MCP_READ) {
+        return Err(AuthError::insufficient_scope());
+    }
+    let user = otw_store::find_user_by_id(&state.pool, row.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("mcp oauth: user lookup failed: {e:#}");
+            AuthError::internal()
+        })?
+        .ok_or_else(AuthError::not_permitted)?;
+    // Defense in depth: authorization already restricts consent to admins, but the owner
+    // flag can change after a token was issued. A demoted account loses access immediately.
+    if !user.is_admin {
+        return Err(AuthError::not_permitted());
+    }
+    if let Err(e) = otw_store::oauth::touch_access_token(&state.pool, row.id).await {
+        tracing::warn!("mcp oauth: updating last_used_at failed: {e:#}");
+    }
+    tracing::debug!(
+        "mcp oauth authenticated: token_id={} client={} user_id={}",
+        row.id,
+        row.client_public_id,
+        row.user_id
+    );
+    Ok(Principal {
+        name: format!("oauth:{}", row.client_name),
+        permissions: read_only_permissions(),
+        user,
+        oauth: true,
+    })
 }
 
 fn http_error(status: StatusCode, msg: &str) -> Response {
@@ -149,27 +372,12 @@ pub async fn handle(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
-    if auth_throttled() && !looks_like_token(token) {
+    if auth_throttled() && !looks_like_any_token(token) {
         return http_error(StatusCode::TOO_MANY_REQUESTS, "too many failed auth attempts");
     }
-    let auth = match otw_store::mcp::find_by_token(&state.pool, token).await {
-        Ok(Some(t)) if t.is_expired() => {
-            // Not a guess, so it does not feed the throttle: the client holds a real token
-            // that simply ran out. Say so, or the fix reads as "check your bearer".
-            return http_error(
-                StatusCode::UNAUTHORIZED,
-                "this MCP token has expired; mint a new one in Settings → AI agents",
-            );
-        }
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            record_auth_failure();
-            return http_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
-        }
-        Err(e) => {
-            tracing::error!("mcp auth lookup failed: {e:#}");
-            return http_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
+    let auth = match authenticate(&state, token).await {
+        Ok(p) => p,
+        Err(e) => return auth_error_response(&state, e),
     };
 
     // One message per request; JSON-RPC batching was removed in the 2025-06-18 revision.
@@ -190,7 +398,7 @@ pub async fn handle(
     match method {
         "initialize" => rpc_result(id, initialize(&params)),
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, tools_list(&auth.permissions)),
+        "tools/list" => rpc_result(id, tools_list(&auth)),
         "tools/call" => tools_call(&state, &auth, id, &params).await,
         _ => rpc_error(id, -32601, &format!("method not found: {method}")),
     }
@@ -237,7 +445,7 @@ pub async fn agent_call(
     shape: Shape,
 ) -> (String, bool) {
     let method = method.to_ascii_uppercase();
-    match run_endpoint_inner(state, perms, token_name, &method, path, body, &shape).await {
+    match run_endpoint_inner(state, perms, token_name, &method, path, body, &shape, None).await {
         Ok((status, text)) => {
             if status.is_success() {
                 (if text.is_empty() { format!("HTTP {status}") } else { text }, false)
@@ -299,7 +507,8 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-fn tools_list(perms: &Value) -> Value {
+fn tools_list(auth: &Principal) -> Value {
+    let perms = &auth.permissions;
     let mut tools = vec![
         json!({
             "name": "otw_catalog",
@@ -341,7 +550,7 @@ fn tools_list(perms: &Value) -> Value {
     // from prompting for a Sharpe ratio, which is how approval prompts stop being read.
     // `readOnlyHint` overclaims by exactly one thing (a backtest appends to its own run
     // history, prunable in one click); see `catalog::Endpoint::compute`.
-    if any_compute(perms) {
+    if !auth.oauth && any_compute(perms) {
         tools.push(json!({
             "name": "otw_compute",
             "title": "Run a calculation",
@@ -363,7 +572,7 @@ fn tools_list(perms: &Value) -> Value {
             "annotations": { "readOnlyHint": true, "openWorldHint": false }
         }));
     }
-    if any_write(perms) {
+    if !auth.oauth && any_write(perms) {
         tools.push(json!({
             "name": "otw_write",
             "title": "Write to the API",
@@ -390,13 +599,24 @@ fn tools_list(perms: &Value) -> Value {
 
 async fn tools_call(
     state: &AppState,
-    auth: &otw_store::mcp::McpToken,
+    auth: &Principal,
     id: Value,
     params: &Value,
 ) -> Response {
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let perms = &auth.permissions;
+
+    // OAuth grants are read-only for this phase. `tools_list` already hides these tools,
+    // but a hand-crafted call must fail closed too.
+    if auth.oauth && matches!(name, "otw_write" | "otw_compute") {
+        return tool_text(
+            id,
+            "OAuth access is read-only: otw_write and otw_compute are not available on this connection."
+                .to_string(),
+            true,
+        );
+    }
 
     match name {
         "otw_catalog" => {
@@ -740,14 +960,24 @@ fn size_error(body: Option<&Value>, total: usize) -> String {
 /// (Network path — wraps the shared [`run_endpoint_inner`] in an MCP tool result.)
 async fn run_endpoint(
     state: &AppState,
-    auth: &otw_store::mcp::McpToken,
+    auth: &Principal,
     id: Value,
     method: &str,
     path: &str,
     body: Option<Value>,
     shape: Shape,
 ) -> Response {
-    match run_endpoint_inner(state, &auth.permissions, &auth.name, method, path, body, &shape).await
+    match run_endpoint_inner(
+        state,
+        &auth.permissions,
+        &auth.name,
+        method,
+        path,
+        body,
+        &shape,
+        Some(&auth.user),
+    )
+    .await
     {
         Ok((status, text)) => {
             if status.is_success() {
@@ -772,6 +1002,7 @@ async fn run_endpoint_inner(
     path: &str,
     body: Option<Value>,
     shape: &Shape,
+    user: Option<&otw_store::User>,
 ) -> Result<(StatusCode, String), String> {
     let bare = path.split('?').next().unwrap_or("");
     if !bare.starts_with("/api/") || path.contains("..") {
@@ -817,7 +1048,7 @@ async fn run_endpoint_inner(
     }
 
     tracing::info!("mcp[{token_name}]: {method} {bare}");
-    let (status, text) = match crate::internal_call::call(state, method, path, body).await {
+    let (status, text) = match crate::internal_call::call_as(state, method, path, body, user).await {
         Ok(res) => res,
         Err(e) => {
             tracing::error!("mcp dispatch failed: {e:#}");
@@ -917,6 +1148,21 @@ fn shrink_oversized(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn principal(perms: Value) -> Principal {
+        Principal {
+            name: "test".into(),
+            permissions: perms,
+            user: otw_store::User {
+                id: uuid::Uuid::nil(),
+                username: "test".into(),
+                password_hash: String::new(),
+                is_admin: true,
+                must_change_password: false,
+            },
+            oauth: false,
+        }
+    }
 
     #[test]
     fn bare_catalog_is_a_compact_index_without_endpoint_paths() {
@@ -1088,7 +1334,7 @@ mod tests {
     #[test]
     fn compute_endpoints_get_their_own_tool_and_are_marked_as_such() {
         let names = |perms: &Value| -> Vec<String> {
-            tools_list(perms)["tools"]
+            tools_list(&principal(perms.clone()))["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1109,7 +1355,7 @@ mod tests {
         assert!(!journal.contains(&"otw_compute".to_string()));
 
         // The host reads this to decide whether to prompt.
-        let tools = tools_list(&json!({ "quant": "rw" }));
+        let tools = tools_list(&principal(json!({ "quant": "rw" })));
         let compute = tools["tools"]
             .as_array()
             .unwrap()

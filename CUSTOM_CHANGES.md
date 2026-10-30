@@ -347,6 +347,75 @@
 
 ---
 
+### C-017 MCP OAuth 2.1 授权服务器（ChatGPT + Codex，2026-10-30）
+
+- **修改原因**：ChatGPT 云端 MCP connector 要求 OAuth 2.1 + PKCE，不能只靠固定 Bearer；本地 Codex 仍需要兼容原有 `otw_mcp_` 固定 Token。目标是在 OTW 内实现最小完整、可撤销的 OAuth 授权服务器，并让 OAuth Token 只具备**只读** MCP 能力。
+- **架构**：
+  - OAuth AS 与 MCP Resource Server 均在 `otw-core` 内，无需独立部署组件。
+  - Authorization Server 使用不透明 Token（不是 JWT）：access / refresh / authorization code / CSRF 均为 256-bit OS 随机值，数据库只存 SHA-256；无新增密码学依赖。
+  - 客户端注册：实现 **DCR（RFC 7591）** 与 **host CLI 预注册**；未实现 CIMD。当前 MCP spec（2026-07-28）推荐 CIMD、把 DCR 标记为 deprecated 但保留兼容；预注册是三种机制之一，ChatGPT connector 的手工 Client ID 流程可直接使用预注册。DCR 主要服务 Codex / 自动发现客户端。若未来 ChatGPT 强制要求 CIMD，需要追加 CIMD（含 HTTPS 元数据抓取、SSRF 防护与缓存）。
+  - 发现：`/.well-known/oauth-protected-resource`（含 `/api/mcp` 路径变体）与 `/.well-known/oauth-authorization-server`（含路径变体）由 Core 提供；`/.well-known/openid-configuration` 返回 JSON 404（不伪装成 OIDC）。
+  - 外部地址只来自 `OTW_PUBLIC_BASE_URL`；不使用 Host / X-Forwarded-* 生成安全 URL。仅接受 HTTPS，loopback HTTP 仅供本地测试。
+- **授权与安全**：
+  - Authorization Code + **强制 PKCE S256**；`plain`/缺失 challenge 拒绝。
+  - `client_id`、`redirect_uri`、`resource`、scope 在授权请求、consent、code 存储、token exchange 全链路绑定；code 只能使用一次。
+  - consent 页面由服务端渲染，HTML 转义；pending request 一次性消费，CSRF Token 只存哈希；没有开放重定向（redirect_uri 必须精确匹配注册值）。
+  - access token 15 分钟；refresh token 30 天、每次使用轮换；同一 `family_id` 的 refresh token 被重复使用时，整族 access/refresh 立即撤销（replay detection）。
+  - 支持 RFC 7009 revocation；用户可通过 `DELETE /api/oauth/grants/{client_id}`（session 保护）或 host CLI `revoke-oauth-grants` 撤销全部授权；密码修改/重置也会撤销该用户的全部 OAuth Token。
+  - Token 校验：过期、撤销、客户端禁用、`resource` 不匹配、缺少 `mcp:read`、非 admin 主体均拒绝；401/403 返回正确的 `WWW-Authenticate`（含 `resource_metadata`、`scope`、`error`）。
+- **权限边界（重要）**：
+  - OTW 当前是**单用户数据模型**：`portfolios` / `watchlists` 等业务表没有 `user_id`，API 也不按用户过滤。因此本阶段**不宣称**实现了用户/投资组合隔离。
+  - OAuth 授权只允许 **admin（当前唯一 owner）**；非 admin 在 authorize 页面直接 403。OAuth Token 绑定真实 `users.id`，MCP 内部调用也用该用户身份注入（`internal_call::call_as`），而不是默认 admin。
+  - scope 映射：`mcp:read` → 所有 catalog 模块 `"r"`；`offline_access` 只影响 refresh token，不授予资源访问。未知 scope 一律拒绝。OAuth 的 `tools/list` 只暴露 `otw_catalog` / `otw_read`，`otw_write` / `otw_compute` 既不在列表中，手工调用也会被拒绝。
+  - 固定 `otw_mcp_` Token 完全保留原有行为（模块权限 + admin 内部身份），用于本地 Codex 兼容。
+- **修改文件**：
+  - `core/otw-store/migrations/9000000109_mcp_oauth.sql`
+  - `core/otw-store/src/oauth.rs`（新）
+  - `core/otw-store/src/lib.rs`（模块注册；密码变更/重置时撤销 OAuth）
+  - `core/otw-core/src/oauth.rs`（新：发现、authorize/consent、token、DCR、revoke、grants、PKCE/URI/scope 校验）
+  - `core/otw-core/src/mcp/mod.rs`（固定 Token + OAuth 双认证、401 challenge、只读 principal、OAuth 工具限制）
+  - `core/otw-core/src/internal_call.rs`（`call_as` 注入真实 OAuth 用户）
+  - `core/otw-core/src/main.rs`（模块/路由/`OTW_PUBLIC_BASE_URL`/OAuth 清理任务）
+  - `core/otw-core/src/cli.rs`（OAuth client 预注册/列表/删除、OAuth grants 撤销）
+  - `deploy/Caddyfile`（`/.well-known/*` → core，避免 SPA fallback 返回 HTML）
+  - `deploy/docker-compose.yml` / `deploy/.env.example`（`OTW_PUBLIC_BASE_URL`）
+  - `scripts/oauth-smoke.py`（不打印 Token 的端到端 OAuth/MCP 冒烟测试）
+  - `core/otw-store/tests/oauth.rs`（code 绑定/单次使用/过期、refresh 轮换/重放、授权撤销）
+- **数据库 migration**：`9000000109_mcp_oauth.sql`，仅新增 5 张表（`oauth_clients`、`oauth_pending_requests`、`oauth_authorization_codes`、`oauth_access_tokens`、`oauth_refresh_tokens`），无 destructive 变更。
+- **API 变化**：
+  - 新增 discovery：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`（及路径变体）。
+  - 新增 OAuth：`/api/oauth/authorize`、`/api/oauth/authorize/decision`、`/api/oauth/token`、`/api/oauth/register`、`/api/oauth/revoke`。
+  - 新增 session 保护：`GET /api/oauth/grants`、`DELETE /api/oauth/grants/{client_id}`。
+  - `/api/mcp` 鉴权扩展为固定 Token 或 OAuth access token；现有固定 Token 行为不变。
+- **部署（已执行）**：
+  1. `deploy/.env` 增加 `OTW_PUBLIC_BASE_URL=https://nova.lumora-lab.top`（gitignored，不进仓库）。
+  2. `docker compose ... build core`，`up -d --no-deps core`；新 Core 自动应用 `9000000109`。
+  3. 重建 Caddy 容器以加载 `/.well-known/*` 规则（编辑后 inode 变化，reload 不够；`--force-recreate` 生效）。
+  4. 公网验证：PRM/ASM 返回 `application/json` 200；OIDC probe 404 JSON；`POST /api/mcp` 无 Token 返回 401 + `WWW-Authenticate`。
+- **测试（实际执行，2026-10-30）**：
+  - `scripts/cargo-check.sh` ✓。
+  - 单元测试：`oauth` 5 个（PKCE 已知向量、redirect URI、public base、scope、HTML escape）✓；MCP 31 个 ✓。
+  - 隔离测试库 `otw_oauth_test` 上 `cargo test -p otw-store --test oauth` 5/5 ✓（code 绑定/单次使用/过期、refresh 轮换/重放撤销、用户级撤销）；测试后已 DROP DATABASE。
+  - 公网端到端 `scripts/oauth-smoke.py`：**40 passed, 0 failed**，覆盖 DCR、consent、PKCE、code 单次使用、wrong PKCE、redirect/resource/client 不匹配、OAuth initialize/tools/list/只读调用、OAuth 写入被拒、refresh 轮换与重放、固定 Token 兼容、revocation。
+  - 额外定向测试：过期/撤销/scope 不足 Token 分别 401/401/403 且 `WWW-Authenticate` 正确；OAuth Bearer 访问 session 路由 401；session Cookie 访问 `/api/mcp` 401；`DELETE /api/oauth/grants/{client_id}` 后 Token 立即 401；非 admin authorize 403。
+  - 测试账号、DCR clients、测试 Token 已全部清理；`oauth_*` 表归零。
+  - **未验证**：ChatGPT 实际 connector 连接与定时任务（需要 ChatGPT 侧操作，且定时任务需单独验证）。ChatGPT 文档站对本服务器 IP 返回 403，本次以 MCP 2026-07-28 spec + 已知 connector 行为实现；未实现 CIMD。
+- **如何回滚**：
+  1. `docker compose stop core`；
+  2. `DELETE FROM _sqlx_migrations WHERE version = 9000000109;`
+  3. `DROP TABLE IF EXISTS oauth_access_tokens, oauth_refresh_tokens, oauth_authorization_codes, oauth_pending_requests, oauth_clients;`
+  4. 还原上述代码并重建 Core。旧 binary 若不回退 migration row 会因 `VersionMissing` 拒绝启动；旧 image 可能已被 Docker 清理，需从代码树重建。
+- **Upstream 潜在冲突点**：中低。`main.rs` 新增模块/路由/AppState 字段；`mcp/mod.rs` 的 `tools_list`/`tools_call`/`run_endpoint` 签名与认证路径被重构（upstream 若大改 MCP 需三方处理）；`internal_call.rs` 新增 `call_as`；`cli.rs` 新增命令；Caddyfile 新增 well-known 路由。migration 使用私有 `9000000109` 段。
+- **已知限制 / 安全风险**：
+  - 没有用户/投资组合隔离（schema 不具备）；只允许 admin，且 admin 可读全部数据。若未来需要多用户/限定组合，必须给业务表加 ownership 并在所有列表/详情/聚合/子资源处强制过滤，不能只过滤顶层列表。
+  - 无 CIMD；DCR 为兼容保留。若 ChatGPT 后续强制 CIMD，需要追加实现。
+  - 没有 OAuth 授权的 Settings UI；用户撤销通过 API 或 host CLI。
+  - 未做 per-IP 的令牌端点限流（DCR 有全局限流与 client 上限）；Token 为 256-bit 随机值，在线暴力不可行。
+  - 固定 MCP Token 在本次任务前已被用户在 UI 中撤销（app_logs 2026-10-29 15:16:50 UTC），本地 Codex 需要重新创建一个 `otw_mcp_` Token，或改用 OAuth。
+  - OAuth 端点只支持 public client（`token_endpoint_auth_method=none`）；不支持 confidential client secret。
+
+---
+
 ## 3. Migration 编号登记
 
 **编号策略（长期约定，2026-09-01 起）**：
@@ -368,6 +437,7 @@
 | 9000000106 | `9000000106_watchlist_price_observations.sql` | Watchlist 价格观察：`watchlist_price_observations`（用户快照；item FK ON DELETE CASCADE，见 C-013） | ✅ 已应用 |
 | 9000000107 | `9000000107_market_quotes.sql` | 共享 Market Quote cache（`(provider, provider_id)` 一行 USD 当前价；Watchlist/Portfolio/Research 共享，见 C-014） | ✅ 已应用 |
 | 9000000108 | `9000000108_agent_api_tokens.sql` | 外部 AI Agent API Token（绑定用户 + scopes + 过期/撤销；见 C-016） | ✅ 已应用 |
+| 9000000109 | `9000000109_mcp_oauth.sql` | MCP OAuth 2.1：clients / pending / codes / access / refresh tokens（见 C-017） | ✅ 已应用 |
 
 **一次性 namespace cutover（2026-09-01）**：custom migration 最初以 `0100`/`0101` 命名并已应用到数据库（`_sqlx_migrations` version 100/101，checksum `26c7a93a…`/`d6df54fb…`）。为规避与未来 upstream 编号（官方已到 0097，即将触及 0100）冲突，执行了 history cutover：
 

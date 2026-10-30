@@ -29,6 +29,13 @@
 		-Server
 	}
 
+	# OAuth discovery documents are served by core, not the SPA. Without this the
+	# frontend catch-all would answer /.well-known/oauth-* with index.html, which MCP
+	# clients correctly treat as a broken authorization server.
+	handle /.well-known/* {
+		reverse_proxy core:8080
+	}
+
 	# API + WebSocket → core service.
 	handle /api/* {
 		reverse_proxy core:8080
