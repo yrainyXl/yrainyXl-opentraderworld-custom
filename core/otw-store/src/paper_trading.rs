@@ -457,9 +457,14 @@ pub async fn execute_order(
         return Err(OrderError::Invalid("computed fill price is not positive".into()));
     }
     let notional_native = quantity * fill_price;
-    let fee_rate = strategy.fee_rate_bps
-        + if side == "sell" { strategy.sell_extra_fee_rate_bps } else { 0.0 };
-    let fee_native = fee_for_order(notional_native, fee_rate, strategy.min_fee);
+    let commission = fee_for_order(notional_native, strategy.fee_rate_bps, strategy.min_fee);
+    // The extra sell-side levy (e.g. A-share stamp duty) has no minimum commission.
+    let sell_levy = if side == "sell" {
+        notional_native * strategy.sell_extra_fee_rate_bps / 10_000.0
+    } else {
+        0.0
+    };
+    let fee_native = commission + sell_levy;
 
     let notional_account = journal_fx::convert(pool, notional_native, &asset.currency, &strategy.currency, today)
         .await?
@@ -608,8 +613,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fee_uses_percentage_or_minimum_whichever_is_higher() {
+    fn commission_uses_percentage_or_minimum_whichever_is_higher() {
         assert!((fee_for_order(10_000.0, 3.0, 5.0) - 5.0).abs() < 1e-9);
         assert!((fee_for_order(100_000.0, 3.0, 5.0) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sell_levy_is_added_after_minimum_commission() {
+        let commission = fee_for_order(10_000.0, 3.0, 5.0);
+        let stamp_duty = 10_000.0 * 5.0 / 10_000.0;
+        assert!((commission + stamp_duty - 10.0).abs() < 1e-9);
     }
 }
