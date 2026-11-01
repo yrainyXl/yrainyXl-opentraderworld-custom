@@ -1163,6 +1163,31 @@ mod tests {
     }
 
     #[test]
+    fn oauth_paper_scope_writes_only_to_paper_trading() {
+        let read_only = oauth_permissions(false);
+        assert!(can_read(&read_only, "paper-trading"));
+        assert!(!can_write(&read_only, "paper-trading"));
+        assert!(!can_write(&read_only, "portfolios"));
+
+        let paper = oauth_permissions(true);
+        assert!(can_read(&paper, "portfolios"));
+        assert!(!can_write(&paper, "portfolios"));
+        assert!(can_write(&paper, "paper-trading"));
+        assert!(!can_delete(&paper, "paper-trading"));
+        assert!(!any_compute(&paper));
+
+        let mut principal = principal(paper);
+        principal.oauth = true;
+        let names: Vec<String> = tools_list(&principal)["tools"]
+            .as_array().unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.iter().any(|name| name == "otw_write"));
+        assert!(!names.iter().any(|name| name == "otw_compute"));
+    }
+
+    #[test]
     fn bare_catalog_is_a_compact_index_without_endpoint_paths() {
         let perms = json!({ "journal": "r", "backtest": "rw" });
         let out = render_catalog(&perms, None);
