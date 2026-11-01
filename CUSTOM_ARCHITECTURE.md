@@ -578,7 +578,7 @@ OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource S
 
 Paper Trading API 已按上述独立 scope 接入 MCP：Agent 只能在独立模拟组合中记录运行和下达模拟订单；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
 
-前端 `/paper-trading` 模块只提供 session-only 的策略创建、状态控制与账本查看；AI 写入仍只能走 MCP，页面不提供下单入口。
+前端 `/paper-trading` 模块只提供 session-only 的策略创建、状态控制与账本查看；AI 写入仍只能走 MCP，页面不提供下单入口。普通 Portfolio Tracker 列表不展示 paper portfolio，直接访问其详情会跳转 `/paper-trading`；paper 账本只在 AI Paper Trading 页只读展示，避免误用普通 Portfolio API 触发 403。
 
 不要因为 AI 能访问数据库，就绕过 OTW 原有 API / 权限模型。
 

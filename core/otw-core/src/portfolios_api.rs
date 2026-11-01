@@ -64,8 +64,17 @@ fn parse_date(s: Option<&str>) -> Result<Date, ApiError> {
 
 async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let portfolios = store::list_portfolios(&state.pool).await?;
+    // Paper portfolios are owned by a Paper Trading strategy and are read-only here: every
+    // normal Portfolio mutation is rejected by `ensure_not_paper_portfolio`. Keep them out of
+    // the Portfolio Tracker list so the UI never offers refresh/edit/delete on a ledger that
+    // belongs to the paper-trading API (the AI Paper Trading page shows them instead).
+    let paper: std::collections::HashSet<Uuid> =
+        otw_store::paper_trading::paper_portfolio_ids(&state.pool).await?.into_iter().collect();
     let mut out = Vec::with_capacity(portfolios.len());
     for pf in &portfolios {
+        if paper.contains(&pf.id) {
+            continue;
+        }
         // Entry freshness: value every card against the shared current Market Quote,
         // refreshing stale instruments before the P&L is computed — never "as of the last
         // Portfolio refresh" alone.
@@ -107,6 +116,9 @@ async fn detail(
     let pf = store::get_portfolio(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("portfolio not found"))?;
+    // A direct URL to a paper portfolio must not render the normal mutation controls. The
+    // SPA redirects to /paper-trading when this flag is set.
+    let paper = otw_store::paper_trading::is_paper_portfolio(&state.pool, id).await?;
     // Entry freshness: refresh stale shared Market Quotes for this portfolio's instruments
     // before computing the assets/summary, so the page never re-shows an old price just
     // because the Portfolio side hasn't refreshed on its own yet.
@@ -125,7 +137,8 @@ async fn detail(
         "summary": summary,
         "assets": assets,
         "operations": operations,
-        "snapshots": snapshots
+        "snapshots": snapshots,
+        "paper": paper
     })))
 }
 

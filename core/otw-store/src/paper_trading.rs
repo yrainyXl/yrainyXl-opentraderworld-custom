@@ -261,6 +261,15 @@ pub async fn is_paper_portfolio(pool: &PgPool, portfolio_id: Uuid) -> anyhow::Re
     Ok(exists)
 }
 
+/// All portfolio ids owned by a paper strategy. The normal Portfolio Tracker lists only real
+/// portfolios; paper rows are managed exclusively from the AI Paper Trading page.
+pub async fn paper_portfolio_ids(pool: &PgPool) -> anyhow::Result<Vec<Uuid>> {
+    sqlx::query_scalar("SELECT portfolio_id FROM paper_trading_strategies")
+        .fetch_all(pool)
+        .await
+        .context("listing paper portfolio ids")
+}
+
 pub async fn is_paper_asset(pool: &PgPool, asset_id: Uuid) -> anyhow::Result<bool> {
     let (exists,): (bool,) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM portfolio_assets a \

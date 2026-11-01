@@ -470,9 +470,10 @@
   - 后端：`core/otw-store/src/data_admin.rs` 注册 `paper-trading` 模块 id（`tables: &[]`；detach + wipe 不截断，避免在未同步清理 portfolio 时破坏 strategy↔ledger 关联）。
   - 前端：`src/lib/modules/paper-trading/{api.js,PaperTradingPage.svelte,StrategyForm.svelte}`、`src/routes/paper-trading/+page.svelte`、`src/lib/modules/registry.js`、`src/lib/i18n/{en,zh}.json`。
 - **功能**：策略列表与创建、暂停/恢复/结束、账户 context（cash / equity / market value / holdings / stale 标记）、AI runs、模拟 orders。页面不提供删除，也不直接写订单；下单仍只走 MCP。
-- **API**：无新增；复用 C-018 的 session-only 端点。
+- **Portfolio Tracker 隔离**：普通 `/api/portfolios` 列表不再返回 paper portfolio（避免卡片上的刷新/编辑/删除按钮触发 C-018 的 403 guard）；`/api/portfolios/{id}` 返回 `paper` 标记，前端直接访问 paper 详情时跳转 `/paper-trading`。paper 账本仍由 Portfolio Tracker 表承载，只是入口收敛到 AI Paper Trading 页。
+- **API**：无新增业务端点；`GET /api/portfolios` 过滤 paper 行，`GET /api/portfolios/{id}` 增加只读 `paper` 字段。
 - **Migration**：无；`paper_trading_*` 表沿用 `9000000110`。
-- **验证**：`npm run build` ✓；`scripts/cargo-check.sh` ✓；部署后 `/paper-trading` 由 SPA 提供，安装模块后出现在模块切换器。
+- **验证**：`npm run build` ✓；`scripts/cargo-check.sh` ✓；部署后 `/paper-trading` 由 SPA 提供，安装模块后出现在模块切换器；Portfolio Tracker 列表不再出现 paper 组合。
 - **部署（2026-11-01）**：core 与 frontend 镜像重建，`up -d --no-deps core`；frontend 一次性容器重新发布 `web-assets`；`app_settings.installed_modules` 已追加 `paper-trading`。公网 `/paper-trading` 返回 200，新 hashed chunks 可访问。
 - **回滚**：停用/卸载模块即可隐藏入口；删除前端路由与 registry 条目、还原 `data_admin.rs` 后重建，无 schema 变化、无数据迁移。
 

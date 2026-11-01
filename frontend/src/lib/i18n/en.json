@@ -4971,6 +4971,7 @@
   "module.paper-trading.desc": "Isolated AI paper-trading strategies and their simulated portfolios.",
   "paper.title": "AI Paper Trading",
   "paper.subtitle": "Isolated simulated accounts. Strategy setup is human-only; ChatGPT can trade only inside a strategy you create.",
+  "paper.redirected": "Paper portfolios are managed in AI Paper Trading.",
   "paper.new": "New strategy",
   "paper.strategies": "Strategies",
   "paper.empty.title": "No paper strategies yet",

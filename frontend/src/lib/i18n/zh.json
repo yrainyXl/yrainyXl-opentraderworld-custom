@@ -4971,6 +4971,7 @@
   "module.paper-trading.desc": "独立的 AI 模拟交易策略及其模拟组合。",
   "paper.title": "AI 模拟交易",
   "paper.subtitle": "独立的模拟账户。策略创建仅限人工操作；ChatGPT 只能在你创建的策略内交易。",
+  "paper.redirected": "模拟组合由 AI 模拟交易页面管理。",
   "paper.new": "新建策略",
   "paper.strategies": "策略",
   "paper.empty.title": "还没有模拟交易策略",
