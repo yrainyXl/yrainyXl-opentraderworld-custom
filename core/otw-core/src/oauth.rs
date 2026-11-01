@@ -678,7 +678,17 @@ async fn register(State(state): State<AppState>, Json(input): Json<RegisterReque
             Ok(s) => s,
             Err(e) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_scope", &e),
         },
-        None => vec![SCOPE_MCP_READ.to_string(), SCOPE_OFFLINE_ACCESS.to_string()],
+        None => {
+            // Keep the registered ceiling in sync with what the MCP challenge advertises:
+            // a client that omits `scope` must still be able to request the optional paper
+            // scope at authorization (the resource owner still has to consent).
+            let mut scopes = vec![SCOPE_MCP_READ.to_string()];
+            if state.mcp_advertise_paper_trade {
+                scopes.push(SCOPE_MCP_PAPER_TRADE.to_string());
+            }
+            scopes.push(SCOPE_OFFLINE_ACCESS.to_string());
+            scopes
+        }
     };
 
     match store::count_clients(&state.pool).await {

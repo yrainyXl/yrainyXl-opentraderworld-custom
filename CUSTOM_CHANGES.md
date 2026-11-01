@@ -416,7 +416,7 @@
 
 ---
 
-### C-018 AI Paper Trading Agent（2026-11-01，后端已验证，待评审/部署）
+### C-018 AI Paper Trading Agent（2026-11-01，已部署本机环境）
 
 - **目标**：让 ChatGPT / 外部 AI 在 OTW 内运行独立模拟交易策略，记录每轮事实、预期、推断和风险判断，并在明确授权后执行模拟买卖；不连接真实券商。
 - **架构边界**：
@@ -451,8 +451,16 @@
   - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio（可指定历史 `start_date`）；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
   - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
   - MCP paper-trade scope 可写：添加资产、记录 AI run、提交模拟订单。
-- **验证状态**：GitHub Actions 在项目固定 Rust 环境及一次性 PostgreSQL 17 测试库运行 `scripts/cargo-check.sh`、相关文件 rustfmt 和后端测试；Store 单元 53、行情 6、OAuth 数据库 5、Paper Trading 数据库 15、历史价格快照 7、Core 461 项通过，Core 4 项显式忽略。Migration 已在临时测试库验证，**未应用到生产，未部署、未合并、未操作真实组合**。完整文件清单、提交和最终 CI 链接见 `docs/design/PAPER_TRADING_VALIDATION.md`。
-- **回滚**：本轮未部署，撤销 PR/分支即可。未来若已应用 migration 并产生模拟成交，不得直接删除 strategy 关联表：失去分类会使模拟持仓进入个人 Research。需要协调恢复部署前备份与旧程序，或保留纸面策略分类及不可变账本并专门实现降级；不提供丢弃模拟账本的自动 down migration。
+- **验证状态**：GitHub Actions 在项目固定 Rust 环境及一次性 PostgreSQL 17 测试库运行 `scripts/cargo-check.sh`、相关文件 rustfmt 和后端测试；Store 单元 53、行情 6、OAuth 数据库 5、Paper Trading 数据库 15、历史价格快照 7、Core 461 项通过，Core 4 项显式忽略。完整文件清单、提交和最终 CI 链接见 `docs/design/PAPER_TRADING_VALIDATION.md`。
+- **部署（2026-11-01）**：
+  - 分支 `feature/paper-trading-agent` @ `441bb4a`（含本次 scope 协商修复）构建 `otw-core:latest`，`up -d --no-deps core`；migration `9000000110` 已应用，PostgreSQL / uploads / 用户数据与连接器均未动。
+  - 实测 ChatGPT connector 重连：ChatGPT **只按 `/api/mcp` 401 `WWW-Authenticate` 里的 `scope` 请求权限**（服务端日志 `scopes=[mcp:read, offline_access]`），并不会读取 discovery 的 `scopes_supported`。因此原先只声明 `mcp:read` 时，重连永远拿不到 paper 权限。
+  - 修复：新增 `OTW_MCP_ADVERTISE_PAPER_TRADE`（默认 `false`）。开启后 401 challenge 广告 `mcp:read mcp:paper-trade offline_access`，DCR 缺省 scope 同步包含 paper；授权仍必须在 consent 页明确同意，开启广告不会直接授予。
+  - 追加修复（同日）：`offline_access` 也必须写进 challenge。实测 ChatGPT 有时会自行补 offline，有时不会（日志出现 `scopes=[mcp:paper-trade, mcp:read]` 的两 scope 授权），因此 challenge 恒定列出 `mcp:read offline_access`，开启 paper 时再加 `mcp:paper-trade`。`/mcp` 不是 core 路由（GET 返回 SPA HTML、POST 405），connector 应统一使用 `/api/mcp`；`/mcp` 的 PRM 路径变体也只是把 resource 指回 `/api/mcp`。
+  - 本机 `deploy/.env` 已设 `OTW_MCP_ADVERTISE_PAPER_TRADE=true`；公网 PRM/ASM 的 `scopes_supported` 本来就含 `mcp:paper-trade`。
+  - 旧 ChatGPT grant 为 `{mcp:read, offline_access}`，需撤销旧 token 后重连，让新授权按新 challenge 重新 consent。
+  - 写入验证（2026-11-01）：创建 `ChatGPT Paper Test`（CNY 100,000，独立 paper portfolio `Paper · ChatGPT Paper Test`）；ChatGPT 通过 MCP 记录一次 `buy` run，并对 `601118 海南橡胶` 成交 1 股。`paper_trading_orders` 关联 `portfolio_operations`（成交价 5.08254 CNY、手续费 5.0、操作日 2026-11-01），未产生真实交易、未触碰普通 Portfolio。
+- **回滚**：本轮已应用 migration `9000000110`。若尚未产生模拟成交，可按 C-017 方式删除 migration row 并重建旧镜像；若已产生模拟成交，不得直接删除 strategy 关联表：失去分类会使模拟持仓进入个人 Research。需要恢复部署前备份与旧程序，或保留纸面策略分类及不可变账本并专门实现降级；不提供丢弃模拟账本的自动 down migration。若仅需关闭 paper 写入，将 `OTW_MCP_ADVERTISE_PAPER_TRADE` 设为 `false` 并重建 core 即可，不必回滚 migration。
 - **Upstream 潜在冲突**：中等。涉及 `main.rs` 路由、MCP Catalog / OAuth scope 与权限映射、Portfolio API 防护、Investment Case 聚合查询；后续 upstream 若改动这些模块需三方合并。
 
 ## 3. Migration 编号登记
@@ -477,7 +485,7 @@
 | 9000000107 | `9000000107_market_quotes.sql` | 共享 Market Quote cache（`(provider, provider_id)` 一行 USD 当前价；Watchlist/Portfolio/Research 共享，见 C-014） | ✅ 已应用 |
 | 9000000108 | `9000000108_agent_api_tokens.sql` | 外部 AI Agent API Token（绑定用户 + scopes + 过期/撤销；见 C-016） | ✅ 已应用 |
 | 9000000109 | `9000000109_mcp_oauth.sql` | MCP OAuth 2.1：clients / pending / codes / access / refresh tokens（见 C-017） | ✅ 已应用 |
-| 9000000110 | `9000000110_paper_trading.sql` | AI Paper Trading：strategy / run / order audit tables（见 C-018） | ✅ 临时测试库已验证；生产未应用 |
+| 9000000110 | `9000000110_paper_trading.sql` | AI Paper Trading：strategy / run / order audit tables（见 C-018） | ✅ 已应用（2026-11-01） |
 
 **一次性 namespace cutover（2026-09-01）**：custom migration 最初以 `0100`/`0101` 命名并已应用到数据库（`_sqlx_migrations` version 100/101，checksum `26c7a93a…`/`d6df54fb…`）。为规避与未来 upstream 编号（官方已到 0097，即将触及 0100）冲突，执行了 history cutover：
 

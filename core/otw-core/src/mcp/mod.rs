@@ -180,10 +180,25 @@ fn oauth_permissions(paper_trade: bool) -> Value {
     Value::Object(map)
 }
 
+/// Scope list advertised in the 401 challenge. MCP clients (ChatGPT included) request
+/// exactly this list, so it must name every scope the connection may need: read, the
+/// optional paper-trading write scope when enabled, and `offline_access` (refresh tokens).
+/// ChatGPT does not reliably add `offline_access` on its own; leaving it out produces
+/// two-scope connections on some registrations.
+fn challenge_scope(advertise_paper_trade: bool) -> String {
+    let mut scopes = vec![otw_store::oauth::SCOPE_MCP_READ];
+    if advertise_paper_trade {
+        scopes.push(otw_store::oauth::SCOPE_MCP_PAPER_TRADE);
+    }
+    scopes.push(otw_store::oauth::SCOPE_OFFLINE_ACCESS);
+    scopes.join(" ")
+}
+
 fn challenge_header(state: &AppState, challenge: Challenge) -> Option<HeaderValue> {
     let base = state.public_base_url.as_deref()?;
+    let scope = challenge_scope(state.mcp_advertise_paper_trade);
     let mut value = format!(
-        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\", scope=\"mcp:read\""
+        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\", scope=\"{scope}\""
     );
     match challenge {
         Challenge::None => {}
@@ -1160,6 +1175,27 @@ mod tests {
             },
             oauth: false,
         }
+    }
+
+    #[test]
+    fn challenge_lists_offline_and_optional_paper_scope() {
+        assert_eq!(
+            challenge_scope(false),
+            format!(
+                "{} {}",
+                otw_store::oauth::SCOPE_MCP_READ,
+                otw_store::oauth::SCOPE_OFFLINE_ACCESS
+            )
+        );
+        assert_eq!(
+            challenge_scope(true),
+            format!(
+                "{} {} {}",
+                otw_store::oauth::SCOPE_MCP_READ,
+                otw_store::oauth::SCOPE_MCP_PAPER_TRADE,
+                otw_store::oauth::SCOPE_OFFLINE_ACCESS
+            )
+        );
     }
 
     #[test]

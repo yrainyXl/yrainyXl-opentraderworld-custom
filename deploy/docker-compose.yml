@@ -85,6 +85,10 @@ services:
       # Public HTTPS origin used to build OAuth discovery/resource URLs. Never derived
       # from Host/X-Forwarded-* headers. Empty disables MCP OAuth (fixed tokens still work).
       OTW_PUBLIC_BASE_URL: ${OTW_PUBLIC_BASE_URL:-}
+      # Offer the optional `mcp:paper-trade` write scope in the MCP 401 challenge so OAuth
+      # clients (ChatGPT) request it. Consent is still required; false keeps connections
+      # read-only. Enable on instances that run AI paper-trading experiments.
+      OTW_MCP_ADVERTISE_PAPER_TRADE: ${OTW_MCP_ADVERTISE_PAPER_TRADE:-false}
       # Secret-free network config core rewrites from Settings → Network (bind-mounted below).
       OTW_NETWORK_ENV: /config/network.env
       # ACME DNS-challenge line for Caddy, also rewritten from Settings → Network.

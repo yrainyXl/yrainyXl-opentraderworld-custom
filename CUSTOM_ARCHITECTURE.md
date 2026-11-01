@@ -573,6 +573,7 @@ OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource S
 - 用户：OAuth 绑定真实 `users.id`，但普通 Portfolio / Watchlist 等业务表仍是单用户模型，因此 authorize 只允许
   admin（owner）；**不得宣称普通业务数据已实现多用户隔离**。Paper Trading 是受限例外：strategy 绑定 `user_id` 并唯一关联独立 Portfolio，API 每次按当前用户校验 strategy；MCP 的 paper scope 也只写该模块。若未来要支持普通组合级隔离，仍必须给对应业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
 - 外部地址：只通过 `OTW_PUBLIC_BASE_URL` 配置，禁止从 Host / X-Forwarded-* 生成安全 URL。
+- 权限协商：MCP 客户端（含 ChatGPT）只按 `/api/mcp` 401 `WWW-Authenticate` 的 `scope` 发起授权，不读取 discovery 的 `scopes_supported`。因此 challenge 必须列全连接需要的 scope：`mcp:read` 与 `offline_access` 恒定列出，`mcp:paper-trade` 由 `OTW_MCP_ADVERTISE_PAPER_TRADE=true` 显式加入；默认 `false` 时不广告 paper。ChatGPT 不会稳定地自行补 `offline_access`，漏写会导致某些授权只拿到两个 scope。广告 scope 不等于授权，最终仍以 consent 页与 Token scope 为准。
 - 固定 `otw_mcp_` Token 保留，作为本地 Codex 兼容路径。
 
 Paper Trading API 已按上述独立 scope 接入 MCP：Agent 只能在独立模拟组合中记录运行和下达模拟订单；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
