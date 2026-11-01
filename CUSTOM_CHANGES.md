@@ -421,6 +421,7 @@
 - **目标**：让 ChatGPT / 外部 AI 在 OTW 内运行独立模拟交易策略，记录每轮事实、预期、推断和风险判断，并在明确授权后执行模拟买卖；不连接真实券商。
 - **架构边界**：
   - 一个 Paper Trading strategy 对应一个独立 Portfolio Tracker portfolio。
+  - strategy 保存初始资金、策略/模型元数据、费用/风险限制，并支持显式 `start_date`（可回填实验真实起始日）。
   - Portfolio Tracker 的 `portfolio_operations` 仍是唯一成交事实账本；Paper Trading 不维护第二份持仓。
   - 可用现金 = 初始资金 + Portfolio operations 的现金流，按操作日期的 Journal FX 转换到策略币种；不维护第二个可变现金余额。
   - `paper_trading_runs` 保存 AI 分析与服务端冻结的账户快照；`paper_trading_orders` 只保存委托意图、报价来源和 Portfolio operation 关联。
@@ -445,7 +446,7 @@
   - `CUSTOM_ARCHITECTURE.md`
 - **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表；不改写既有 Portfolio ledger。
 - **API**：
-  - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
+  - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio（可指定历史 `start_date`）；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
   - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
   - MCP paper-trade scope 可写：添加资产、记录 AI run、提交模拟订单。
 - **验证状态**：当前只在 `feature/paper-trading-agent` 分支提交代码和单元测试；**尚未运行 Rust 编译/测试、尚未应用数据库 migration、尚未部署**。需要通过项目规定的 `scripts/cargo-check.sh` 与目标测试后才可部署。
