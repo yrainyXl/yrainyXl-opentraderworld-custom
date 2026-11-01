@@ -280,7 +280,16 @@ pub async fn create_run(
     .fetch_one(pool)
     .await
     .context("loading idempotent paper run")?;
-    if existing.decision != decision || existing.inference != inference {
+    if existing.decision != decision
+        || existing.confidence != confidence
+        || existing.inference != inference
+        || existing.model != model
+        || existing.scheduled_at != scheduled_at
+        || existing.market_facts != *market_facts
+        || existing.market_expectations != *market_expectations
+        || existing.evidence != *evidence
+        || existing.risk_assessment != *risk_assessment
+    {
         return Err(anyhow!("idempotency key already used for a different paper run"));
     }
     Ok(existing)
