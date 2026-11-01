@@ -541,7 +541,11 @@ pub async fn execute_order(
     let mut target_market_value = 0.0_f64;
     for view in &views {
         if view.quantity > 0.0 {
-            match view.market_value {
+            let quote_fresh = view.asset.last_price_at.is_some_and(|at| {
+                let age = (now - at).whole_seconds();
+                (-5..=30).contains(&age)
+            });
+            match view.market_value.filter(|_| quote_fresh) {
                 Some(value) => market_value += value,
                 None => market_value_complete = false,
             }
