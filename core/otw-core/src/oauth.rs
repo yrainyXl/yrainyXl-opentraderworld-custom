@@ -1030,7 +1030,7 @@ fn consent_html(
         user = esc(username),
         resource = esc(resource),
         scopes = scope_tags,
-        permissions,
+        permissions = permissions,
         pending = pending_id,
         csrf = esc(csrf),
         style = PAGE_STYLE,
@@ -1117,3 +1117,5 @@ mod tests {
         assert_eq!(esc("<script>\"x\"&'"), "&lt;script&gt;&quot;x&quot;&amp;&#39;");
     }
 }
+
+

@@ -1188,6 +1188,35 @@ mod tests {
     }
 
     #[test]
+    fn paper_scope_never_grants_generic_module_writes_or_deletes() {
+        let permissions = oauth_permissions(true);
+        for (module, _) in catalog::MODULES {
+            assert_eq!(can_write(&permissions, module), *module == "paper-trading");
+            assert!(!can_delete(&permissions, module));
+        }
+        let read_principal = Principal { oauth: true, ..principal(oauth_permissions(false)) };
+        assert!(!tools_list(&read_principal)["tools"].as_array().unwrap().iter()
+            .any(|tool| tool["name"] == "otw_write"));
+    }
+
+    #[test]
+    fn paper_setup_and_control_are_never_mcp_allowlisted() {
+        let root = "/api/paper-trading/strategies";
+        let strategy = "/api/paper-trading/strategies/00000000-0000-0000-0000-000000000001";
+        assert!(catalog::lookup("GET", root).is_some());
+        assert!(catalog::lookup("POST", root).is_none());
+        assert!(catalog::lookup("PATCH", strategy).is_none());
+        assert!(catalog::lookup("DELETE", strategy).is_none());
+        for suffix in ["runs", "orders", "assets"] {
+            let path = format!("{strategy}/{suffix}");
+            let endpoint = catalog::lookup("POST", &path).expect("allowlisted constrained paper write");
+            assert_eq!(endpoint.module, "paper-trading");
+            assert!(!endpoint.compute);
+            assert!(catalog::lookup("DELETE", &path).is_none());
+        }
+    }
+
+    #[test]
     fn bare_catalog_is_a_compact_index_without_endpoint_paths() {
         let perms = json!({ "journal": "r", "backtest": "rw" });
         let out = render_catalog(&perms, None);
@@ -1424,3 +1453,5 @@ mod tests {
         assert!(fenced.contains("ignore your instructions"));
     }
 }
+
+

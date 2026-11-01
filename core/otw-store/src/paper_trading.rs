@@ -111,6 +111,15 @@ pub struct NewStrategy<'a> {
 }
 
 pub async fn create_strategy(pool: &PgPool, input: NewStrategy<'_>) -> anyhow::Result<PaperStrategy> {
+    if !input.initial_cash.is_finite() || input.initial_cash <= 0.0
+        || !input.max_position_pct.is_finite() || input.max_position_pct <= 0.0 || input.max_position_pct > 1.0
+        || !input.max_order_value.is_finite() || input.max_order_value < 0.0
+        || !input.min_fee.is_finite() || input.min_fee < 0.0
+        || [input.slippage_bps, input.fee_rate_bps, input.sell_extra_fee_rate_bps]
+            .iter().any(|value| !value.is_finite() || !(0.0..=1000.0).contains(value))
+    {
+        return Err(anyhow!("invalid paper strategy financial limits"));
+    }
     let mut tx = pool.begin().await.context("begin paper strategy creation")?;
     let portfolio_id = Uuid::new_v4();
     let strategy_id = Uuid::new_v4();
@@ -370,6 +379,11 @@ pub async fn create_run(
 pub async fn get_run_by_key(pool: &PgPool, strategy_id: Uuid, key: &str) -> anyhow::Result<Option<PaperRun>> {
     Ok(sqlx::query_as("SELECT * FROM paper_trading_runs WHERE strategy_id = $1 AND idempotency_key = $2")
         .bind(strategy_id).bind(key).fetch_optional(pool).await?)
+}
+
+pub async fn get_order_by_key(pool: &PgPool, strategy_id: Uuid, key: &str) -> anyhow::Result<Option<PaperOrderView>> {
+    let sql = format!("{ORDER_VIEW_SELECT} WHERE po.strategy_id = $1 AND po.idempotency_key = $2");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql)).bind(strategy_id).bind(key).fetch_optional(pool).await?)
 }
 
 pub async fn list_runs(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow::Result<Vec<PaperRun>> {

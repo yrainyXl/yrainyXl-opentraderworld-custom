@@ -462,8 +462,10 @@ async fn place_order(
     if body.note.len() > 1000 {
         return Err(ApiError::bad_request("note is too long (max 1000 characters)"));
     }
-    let assets = portfolios::list_assets(&state.pool, strategy.portfolio_id).await?;
-    market::ensure_portfolio_assets(&state.pool, &assets).await?;
+    if store::get_order_by_key(&state.pool, strategy.id, key).await?.is_none() {
+        let assets = portfolios::list_assets(&state.pool, strategy.portfolio_id).await?;
+        market::ensure_portfolio_assets(&state.pool, &assets).await?;
+    }
     let order = store::execute_order(
         &state.pool,
         user.id,
@@ -515,6 +517,31 @@ async fn list_orders(
     owned_strategy(&state.pool, id, user.id).await?;
     let orders = store::list_orders(&state.pool, id, query.limit.unwrap_or(50)).await?;
     Ok(Json(json!({ "orders": orders })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn order_contract_rejects_client_prices_fees_and_portfolio_ids() {
+        let valid = json!({"idempotency_key":"order-1", "run_id":Uuid::new_v4(),
+            "asset_id":Uuid::new_v4(), "side":"buy", "quantity":10.0});
+        assert!(serde_json::from_value::<PlaceOrderBody>(valid.clone()).is_ok());
+        for field in ["price", "fill_price", "fee", "portfolio_id", "user_id", "quote_at"] {
+            let mut body = valid.clone();
+            body[field] = json!(1);
+            assert!(serde_json::from_value::<PlaceOrderBody>(body).is_err(), "accepted {field}");
+        }
+    }
+
+    #[test]
+    fn run_contract_rejects_client_account_snapshots() {
+        let mut body = json!({"idempotency_key":"run-1", "decision":"no_trade", "confidence":3});
+        assert!(serde_json::from_value::<CreateRunBody>(body.clone()).is_ok());
+        body["account_snapshot"] = json!({"cash":999999});
+        assert!(serde_json::from_value::<CreateRunBody>(body).is_err());
+    }
 }
 
 
