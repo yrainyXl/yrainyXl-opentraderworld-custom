@@ -15,8 +15,8 @@
 //! * Discovery URLs are built only from `OTW_PUBLIC_BASE_URL`, never from Host or
 //!   X-Forwarded-* headers.
 //! * No code, verifier, token or cookie value is ever logged.
-//! * Only read scope (`mcp:read`) is minted; the MCP layer additionally exposes just the
-//!   read tools for OAuth principals.
+//! * `mcp:read` is read-only. The separate `mcp:paper-trade` opt-in grants write access
+//!   only to the isolated Paper Trading module; normal Portfolio remains read-only.
 //!
 //! OTW is single-user: authorization is limited to admin accounts and the data model does
 //! not provide per-portfolio ownership. See CUSTOM_CHANGES C-017.
@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use crate::{ApiError, AppState, SESSION_COOKIE};
 use otw_store::mcp::hash_token;
 use otw_store::oauth as store;
-use otw_store::oauth::{OAuthClient, SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS};
+use otw_store::oauth::{OAuthClient, SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS};
 
 const REGISTER_LIMIT: u32 = 20;
 const REGISTER_WINDOW: Duration = Duration::from_secs(60);
@@ -999,22 +999,27 @@ fn consent_html(
         .iter()
         .map(|s| format!("<span class=\"scope\">{}</span>", esc(s)))
         .collect();
+    let permissions = if scopes.iter().any(|s| s == SCOPE_MCP_PAPER_TRADE) {
+        "This grants read access to OTW data plus write access only to isolated Paper Trading accounts. It cannot change normal Portfolio holdings or send broker orders."
+    } else {
+        "This grants read-only access. It cannot write, delete, trade, or change your holdings."
+    };
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <title>Authorize {client}</title>{style}</head><body><main>\
          <h1>Authorize {client}</h1>\
-         <p><strong>{client}</strong> wants to read your OpenTraderWorld data.</p>\
+         <p><strong>{client}</strong> wants access to your OpenTraderWorld data.</p>\
          <div class=\"box\"><div class=\"k\">Signed in as</div><div class=\"v\">{user}</div></div>\
          <div class=\"box\"><div class=\"k\">MCP resource</div><div class=\"v\">{resource}</div></div>\
          <div class=\"box\"><div class=\"k\">Scopes</div><div class=\"scopes\">{scopes}</div></div>\
-         <p>This grants read-only access. It cannot write, delete, trade, or change your holdings.</p>\
+         <p>{permissions}</p>\
          <form method=\"post\" action=\"/api/oauth/authorize/decision\" autocomplete=\"off\">\
          <input type=\"hidden\" name=\"request_id\" value=\"{pending}\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
          <div class=\"actions\">\
-         <button class=\"allow\" type=\"submit\" name=\"decision\" value=\"allow\">Allow read access</button>\
+         <button class=\"allow\" type=\"submit\" name=\"decision\" value=\"allow\">Allow requested access</button>\
          <button class=\"deny\" type=\"submit\" name=\"decision\" value=\"deny\">Deny</button>\
          </div></form>\
          <p>Only the OpenTraderWorld owner account can authorize this connector. \
@@ -1024,6 +1029,7 @@ fn consent_html(
         user = esc(username),
         resource = esc(resource),
         scopes = scope_tags,
+        permissions,
         pending = pending_id,
         csrf = esc(csrf),
         style = PAGE_STYLE,
