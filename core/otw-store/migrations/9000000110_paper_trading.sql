@@ -80,3 +80,11 @@ CREATE INDEX IF NOT EXISTS idx_paper_orders_strategy_at
     ON paper_trading_orders(strategy_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_paper_orders_run
     ON paper_trading_orders(run_id);
+
+-- Existing OAuth clients may request the new scope at their next authorize flow.
+-- This expands the client's allowed-scope ceiling only; it does NOT grant the scope.
+-- The resource owner must still request it and approve it on the consent page.
+UPDATE oauth_clients
+SET scopes = array_append(scopes, 'mcp:paper-trade')
+WHERE 'mcp:read' = ANY(scopes)
+  AND NOT ('mcp:paper-trade' = ANY(scopes));
