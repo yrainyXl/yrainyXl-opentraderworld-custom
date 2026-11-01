@@ -163,6 +163,13 @@ export const modules = [
     descKey: 'module.portfolios.desc'
   },
   {
+    id: 'paper-trading',
+    name: 'AI Paper Trading',
+    icon: 'sparkles',
+    base: '/paper-trading',
+    descKey: 'module.paper-trading.desc'
+  },
+  {
     id: 'watchlists',
     name: 'Watchlists',
     icon: 'star',

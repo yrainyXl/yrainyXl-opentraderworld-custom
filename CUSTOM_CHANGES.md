@@ -463,6 +463,19 @@
 - **回滚**：本轮已应用 migration `9000000110`。若尚未产生模拟成交，可按 C-017 方式删除 migration row 并重建旧镜像；若已产生模拟成交，不得直接删除 strategy 关联表：失去分类会使模拟持仓进入个人 Research。需要恢复部署前备份与旧程序，或保留纸面策略分类及不可变账本并专门实现降级；不提供丢弃模拟账本的自动 down migration。若仅需关闭 paper 写入，将 `OTW_MCP_ADVERTISE_PAPER_TRADE` 设为 `false` 并重建 core 即可，不必回滚 migration。
 - **Upstream 潜在冲突**：中等。涉及 `main.rs` 路由、MCP Catalog / OAuth scope 与权限映射、Portfolio API 防护、Investment Case 聚合查询；后续 upstream 若改动这些模块需三方合并。
 
+### C-019 AI Paper Trading 管理页（2026-11-01）
+
+- **修改原因**：C-018 只有后端 API/MCP，策略创建是 session-only 且没有 UI，只能开 DevTools 调 REST。补一个最小管理页，供创建/暂停/结束策略并查看模拟账户与 AI 记录。
+- **修改文件**：
+  - 后端：`core/otw-store/src/data_admin.rs` 注册 `paper-trading` 模块 id（`tables: &[]`；detach + wipe 不截断，避免在未同步清理 portfolio 时破坏 strategy↔ledger 关联）。
+  - 前端：`src/lib/modules/paper-trading/{api.js,PaperTradingPage.svelte,StrategyForm.svelte}`、`src/routes/paper-trading/+page.svelte`、`src/lib/modules/registry.js`、`src/lib/i18n/{en,zh}.json`。
+- **功能**：策略列表与创建、暂停/恢复/结束、账户 context（cash / equity / market value / holdings / stale 标记）、AI runs、模拟 orders。页面不提供删除，也不直接写订单；下单仍只走 MCP。
+- **API**：无新增；复用 C-018 的 session-only 端点。
+- **Migration**：无；`paper_trading_*` 表沿用 `9000000110`。
+- **验证**：`npm run build` ✓；`scripts/cargo-check.sh` ✓；部署后 `/paper-trading` 由 SPA 提供，安装模块后出现在模块切换器。
+- **部署（2026-11-01）**：core 与 frontend 镜像重建，`up -d --no-deps core`；frontend 一次性容器重新发布 `web-assets`；`app_settings.installed_modules` 已追加 `paper-trading`。公网 `/paper-trading` 返回 200，新 hashed chunks 可访问。
+- **回滚**：停用/卸载模块即可隐藏入口；删除前端路由与 registry 条目、还原 `data_admin.rs` 后重建，无 schema 变化、无数据迁移。
+
 ## 3. Migration 编号登记
 
 **编号策略（长期约定，2026-09-01 起）**：
