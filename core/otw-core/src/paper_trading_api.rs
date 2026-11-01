@@ -103,9 +103,8 @@ pub(crate) struct CreateStrategyBody {
     prompt_version: String,
     #[serde(default = "default_max_position_pct")]
     max_position_pct: f64,
-    /// 0 disables the per-order notional cap.
-    #[serde(default)]
-    max_order_value: f64,
+    /// Omit for 30% of initial cash; set 0 to disable the per-order notional cap.
+    max_order_value: Option<f64>,
     #[serde(default = "default_slippage_bps")]
     slippage_bps: f64,
     #[serde(default = "default_fee_rate_bps")]
@@ -143,7 +142,7 @@ async fn create(
     if !body.max_position_pct.is_finite() || body.max_position_pct <= 0.0 || body.max_position_pct > 1.0 {
         return Err(ApiError::bad_request("max_position_pct must be greater than 0 and at most 1"));
     }
-    if !body.max_order_value.is_finite() || body.max_order_value < 0.0 {
+    if body.max_order_value.is_some_and(|value| !value.is_finite() || value < 0.0) {
         return Err(ApiError::bad_request("max_order_value must be zero or positive"));
     }
     for (label, value) in [
@@ -159,11 +158,7 @@ async fn create(
         return Err(ApiError::bad_request("min_fee must be zero or positive"));
     }
 
-    let max_order_value = if body.max_order_value == 0.0 {
-        body.initial_cash * 0.30
-    } else {
-        body.max_order_value
-    };
+    let max_order_value = body.max_order_value.unwrap_or(body.initial_cash * 0.30);
     let strategy = store::create_strategy(&state.pool, store::NewStrategy {
         user_id: user.id,
         name,
