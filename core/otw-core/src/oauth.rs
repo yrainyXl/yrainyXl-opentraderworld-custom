@@ -1093,7 +1093,23 @@ mod tests {
         let scopes = parse_scope_list("mcp:read mcp:paper-trade").unwrap();
         assert!(scopes.iter().any(|s| s == SCOPE_MCP_READ));
         assert!(scopes.iter().any(|s| s == SCOPE_MCP_PAPER_TRADE));
-        assert!(parse_scope_list("mcp:paper-trade").is_ok());
+
+        let client = OAuthClient {
+            id: uuid::Uuid::nil(),
+            client_id: "test-client".into(),
+            client_name: "Test".into(),
+            redirect_uris: vec![],
+            grant_types: vec![],
+            response_types: vec![],
+            token_endpoint_auth_method: "none".into(),
+            scopes: vec![SCOPE_MCP_READ.into(), SCOPE_MCP_PAPER_TRADE.into()],
+            source: "test".into(),
+            created_at: OffsetDateTime::now_utc(),
+            last_used_at: None,
+            disabled_at: None,
+        };
+        assert!(parse_scopes(Some("mcp:paper-trade"), &client).is_err());
+        assert!(parse_scopes(Some("mcp:read mcp:paper-trade"), &client).is_ok());
     }
 
     #[test]
