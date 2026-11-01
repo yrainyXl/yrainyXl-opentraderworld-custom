@@ -190,6 +190,27 @@ pub async fn get_strategy_for_user(
         .context("fetching owned paper strategy")?)
 }
 
+/// Change strategy status. Ended strategies are terminal and cannot be reactivated.
+pub async fn set_strategy_status(
+    pool: &PgPool,
+    id: Uuid,
+    user_id: Uuid,
+    status: &str,
+) -> anyhow::Result<Option<PaperStrategy>> {
+    let sql = format!(
+        "UPDATE paper_trading_strategies SET status = $3, updated_at = now() \
+         WHERE id = $1 AND user_id = $2 AND (status <> 'ended' OR $3 = 'ended') \
+         RETURNING {STRATEGY_COLS}"
+    );
+    Ok(sqlx::query_as::<_, PaperStrategy>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(user_id)
+        .bind(status)
+        .fetch_optional(pool)
+        .await
+        .context("updating paper strategy status")?)
+}
+
 pub async fn is_paper_portfolio(pool: &PgPool, portfolio_id: Uuid) -> anyhow::Result<bool> {
     let (exists,): (bool,) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM paper_trading_strategies WHERE portfolio_id = $1)",
