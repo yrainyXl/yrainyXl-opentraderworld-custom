@@ -65,6 +65,7 @@ mod notif_send;
 mod oauth;
 mod portfolios;
 mod portfolios_api;
+mod paper_trading_api;
 mod portfolios_import;
 mod portfolios_import_api;
 mod prompts_api;
@@ -446,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(quant_api::routes())
         .merge(mportfolios_api::routes())
         .merge(portfolios_api::routes())
+        .merge(paper_trading_api::routes())
         .merge(portfolios_import_api::routes())
         .merge(watchlists_api::routes())
         .merge(rate_api::routes())
