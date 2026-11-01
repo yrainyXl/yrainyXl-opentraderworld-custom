@@ -341,6 +341,9 @@ async fn add_run(
     Json(body): Json<CreateRunBody>,
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
+    if strategy.status == "ended" {
+        return Err(ApiError::conflict("cannot record new runs for an ended strategy"));
+    }
     let key = body.idempotency_key.trim();
     if key.is_empty() || key.len() > 128 {
         return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
