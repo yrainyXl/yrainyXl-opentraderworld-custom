@@ -386,7 +386,7 @@ fn fee_for_order(notional: f64, rate_bps: f64, min_fee: f64) -> f64 {
     (notional * rate_bps / 10_000.0).max(min_fee)
 }
 
-/// China A-shares follow T+1: shares bought today are not sellable today. Same-day
+/// China A-share stocks follow T+1: shares bought today are not sellable today. Same-day
 /// sells reduce the quantity available from the position carried into today.
 fn china_sellable_quantity(ops: &[portfolios::Operation], today: Date) -> f64 {
     let mut sellable = 0.0_f64;
@@ -552,7 +552,7 @@ pub async fn execute_order(
         return Err(OrderError::Invalid("add decision requires an existing position; use buy".into()));
     }
     if side == "sell" {
-        let sellable = if asset.provider == "china" {
+        let sellable = if asset.provider == "china" && asset.asset_class == "stock" {
             let operations = portfolios::list_operations(pool, asset_id).await?;
             china_sellable_quantity(&operations, today)
         } else {
