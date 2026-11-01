@@ -416,6 +416,42 @@
 
 ---
 
+### C-018 AI Paper Trading Agent（2026-11-01，开发中）
+
+- **目标**：让 ChatGPT / 外部 AI 在 OTW 内运行独立模拟交易策略，记录每轮事实、预期、推断和风险判断，并在明确授权后执行模拟买卖；不连接真实券商。
+- **架构边界**：
+  - 一个 Paper Trading strategy 对应一个独立 Portfolio Tracker portfolio。
+  - Portfolio Tracker 的 `portfolio_operations` 仍是唯一成交事实账本；Paper Trading 不维护第二份持仓。
+  - 可用现金 = 初始资金 + Portfolio operations 的现金流，按操作日期的 Journal FX 转换到策略币种；不维护第二个可变现金余额。
+  - `paper_trading_runs` 保存 AI 分析与服务端冻结的账户快照；`paper_trading_orders` 只保存委托意图、报价来源和 Portfolio operation 关联。
+  - Research 的跨 Portfolio 持仓聚合排除 paper portfolios；普通 Portfolio API / 导入路径拒绝修改 paper portfolio 的成交账本。
+- **安全执行**：
+  - 下单 body 不接受成交价或手续费；服务端读取 Shared Market Quote，校验报价新鲜度，应用策略滑点和费用配置。
+  - 服务端按策略行锁串行化下单；校验 run 与 strategy 归属、决策方向与订单方向、幂等键、可用现金、long-only 可卖数量、单笔金额和单标的仓位上限。
+  - 订单与 Portfolio operation 在同一数据库事务提交；重复请求返回原订单，复用同一幂等键但提交不同订单内容则拒绝。
+  - 默认费用是假设值：佣金 3 bps、最低佣金 5（资产币种）、卖出额外 levy 5 bps、滑点 5 bps；均可在创建策略时调整，不宣称覆盖所有市场真实费率。
+- **OAuth / MCP**：
+  - 新增可选 scope `mcp:paper-trade`，必须在 OAuth consent 中明确授权。
+  - `mcp:read` 仍是默认只读；`mcp:paper-trade` 只将 MCP Catalog 的 `paper-trading` 模块提升为 `rw`，普通 `portfolios` 及其他模块仍为 `r`。
+  - OAuth 仍不可删除、不可调用 `otw_compute`；策略创建是 session-only，不加入 MCP Catalog。
+- **主要文件**：
+  - `core/otw-store/migrations/9000000110_paper_trading.sql`
+  - `core/otw-store/src/paper_trading.rs`、`core/otw-store/src/lib.rs`
+  - `core/otw-core/src/paper_trading_api.rs`、`main.rs`
+  - `core/otw-core/src/mcp/catalog.rs`、`mcp/mod.rs`
+  - `core/otw-store/src/oauth.rs`、`core/otw-core/src/oauth.rs`
+  - `core/otw-store/src/investment_cases.rs`、`investment_cases_api.rs`
+  - `core/otw-core/src/portfolios_api.rs`、`portfolios_import_api.rs`
+  - `CUSTOM_ARCHITECTURE.md`
+- **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表；不改写既有 Portfolio ledger。
+- **API**：
+  - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio。
+  - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
+  - MCP paper-trade scope 可写：添加资产、记录 AI run、提交模拟订单。
+- **验证状态**：当前只在 `feature/paper-trading-agent` 分支提交代码和单元测试；**尚未运行 Rust 编译/测试、尚未应用数据库 migration、尚未部署**。需要通过项目规定的 `scripts/cargo-check.sh` 与目标测试后才可部署。
+- **回滚**：部署前可直接丢弃分支。若未来已应用 migration，先停止 Core，在事务中删除 `_sqlx_migrations` 的 version `9000000110`，再删除 `paper_trading_orders`、`paper_trading_runs`、`paper_trading_strategies` 三张表，恢复旧代码并重建 Core。
+- **Upstream 潜在冲突**：中等。涉及 `main.rs` 路由、MCP Catalog / OAuth scope 与权限映射、Portfolio API 防护、Investment Case 聚合查询；后续 upstream 若改动这些模块需三方合并。
+
 ## 3. Migration 编号登记
 
 **编号策略（长期约定，2026-09-01 起）**：
@@ -438,6 +474,7 @@
 | 9000000107 | `9000000107_market_quotes.sql` | 共享 Market Quote cache（`(provider, provider_id)` 一行 USD 当前价；Watchlist/Portfolio/Research 共享，见 C-014） | ✅ 已应用 |
 | 9000000108 | `9000000108_agent_api_tokens.sql` | 外部 AI Agent API Token（绑定用户 + scopes + 过期/撤销；见 C-016） | ✅ 已应用 |
 | 9000000109 | `9000000109_mcp_oauth.sql` | MCP OAuth 2.1：clients / pending / codes / access / refresh tokens（见 C-017） | ✅ 已应用 |
+| 9000000110 | `9000000110_paper_trading.sql` | AI Paper Trading：strategy / run / order audit tables（见 C-018） | ⏳ 分支开发中，未应用 |
 
 **一次性 namespace cutover（2026-09-01）**：custom migration 最初以 `0100`/`0101` 命名并已应用到数据库（`_sqlx_migrations` version 100/101，checksum `26c7a93a…`/`d6df54fb…`）。为规避与未来 upstream 编号（官方已到 0097，即将触及 0100）冲突，执行了 history cutover：
 
