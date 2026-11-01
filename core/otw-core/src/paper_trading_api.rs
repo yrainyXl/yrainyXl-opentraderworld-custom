@@ -19,6 +19,9 @@ use otw_store::User;
 
 const DECISIONS: [&str; 7] = ["observe", "hold", "buy", "add", "reduce", "exit", "no_trade"];
 
+fn empty_object() -> Value { json!({}) }
+fn empty_array() -> Value { json!([]) }
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/paper-trading/strategies", get(list).post(create))
@@ -325,17 +328,17 @@ pub(crate) struct CreateRunBody {
     idempotency_key: String,
     /// Optional RFC3339 scheduled time; omitted means server receipt time.
     scheduled_at: Option<String>,
-    #[serde(default)]
+    #[serde(default = "empty_object")]
     market_facts: Value,
-    #[serde(default)]
+    #[serde(default = "empty_object")]
     market_expectations: Value,
     #[serde(default)]
     inference: String,
     decision: String,
     confidence: i16,
-    #[serde(default)]
+    #[serde(default = "empty_array")]
     evidence: Value,
-    #[serde(default)]
+    #[serde(default = "empty_object")]
     risk_assessment: Value,
 }
 
@@ -355,6 +358,15 @@ async fn add_run(
     }
     if !DECISIONS.contains(&body.decision.as_str()) {
         return Err(ApiError::bad_request("invalid decision"));
+    }
+    if !body.market_facts.is_object() || !body.market_expectations.is_object() || !body.risk_assessment.is_object() {
+        return Err(ApiError::bad_request("market_facts, market_expectations and risk_assessment must be JSON objects"));
+    }
+    if !body.evidence.is_array() {
+        return Err(ApiError::bad_request("evidence must be a JSON array"));
+    }
+    if body.inference.len() > 20_000 {
+        return Err(ApiError::bad_request("inference is too long (max 20000 bytes)"));
     }
     if !(1..=5).contains(&body.confidence) {
         return Err(ApiError::bad_request("confidence must be between 1 and 5"));
