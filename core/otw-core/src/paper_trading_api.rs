@@ -10,27 +10,45 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use time::{format_description::well_known::{Iso8601, Rfc3339}, Date, OffsetDateTime};
+use time::{
+    format_description::well_known::{Iso8601, Rfc3339},
+    Date, OffsetDateTime,
+};
 use uuid::Uuid;
 
 use crate::{market, portfolios::prices, ApiError, AppState};
-use otw_store::{journal::CURRENCIES, paper_trading as store, portfolios};
 use otw_store::User;
+use otw_store::{journal::CURRENCIES, paper_trading as store, portfolios};
 
-const DECISIONS: [&str; 7] = ["observe", "hold", "buy", "add", "reduce", "exit", "no_trade"];
+const DECISIONS: [&str; 7] = [
+    "observe", "hold", "buy", "add", "reduce", "exit", "no_trade",
+];
 
-fn empty_object() -> Value { json!({}) }
-fn empty_array() -> Value { json!([]) }
+fn empty_object() -> Value {
+    json!({})
+}
+fn empty_array() -> Value {
+    json!([])
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/paper-trading/strategies", get(list).post(create))
         .route("/api/paper-trading/search", get(search))
-        .route("/api/paper-trading/strategies/{id}", get(detail).patch(update_strategy))
+        .route(
+            "/api/paper-trading/strategies/{id}",
+            get(detail).patch(update_strategy),
+        )
         .route("/api/paper-trading/strategies/{id}/context", get(context))
         .route("/api/paper-trading/strategies/{id}/assets", post(add_asset))
-        .route("/api/paper-trading/strategies/{id}/runs", get(list_runs).post(add_run))
-        .route("/api/paper-trading/strategies/{id}/orders", get(list_orders).post(place_order))
+        .route(
+            "/api/paper-trading/strategies/{id}/runs",
+            get(list_runs).post(add_run),
+        )
+        .route(
+            "/api/paper-trading/strategies/{id}/orders",
+            get(list_orders).post(place_order),
+        )
 }
 
 async fn owned_strategy(
@@ -57,12 +75,22 @@ async fn build_context(
     let now = OffsetDateTime::now_utc();
     let mut market_value = 0.0_f64;
     let mut complete = account_fx_available;
-    let mut unpriced = if account_fx_available { Vec::new() } else { vec![format!("FX: USD/{} unavailable", strategy.currency)] };
+    let mut unpriced = if account_fx_available {
+        Vec::new()
+    } else {
+        vec![format!("FX: USD/{} unavailable", strategy.currency)]
+    };
     for view in &views {
         if view.quantity > 0.0 {
             let quote_fresh = view.asset.spot_provider.is_none()
-                && view.asset.last_price_at.is_some_and(|at| (-5..=30).contains(&(now - at).whole_seconds()));
-            match view.market_value.filter(|_| quote_fresh) {
+                && view
+                    .asset
+                    .last_price_at
+                    .is_some_and(|at| (-5..=30).contains(&(now - at).whole_seconds()));
+            match view
+                .market_value
+                .filter(|value| quote_fresh && value.is_finite() && *value >= 0.0)
+            {
                 Some(value) => market_value += value,
                 None => {
                     complete = false;
@@ -71,6 +99,7 @@ async fn build_context(
             }
         }
     }
+    complete = complete && cash.is_finite() && (cash + market_value).is_finite();
     let equity = complete.then_some(cash + market_value);
     let snapshot = json!({
         "currency": strategy.currency,
@@ -129,13 +158,27 @@ pub(crate) struct CreateStrategyBody {
     min_fee: f64,
 }
 
-fn default_currency() -> String { "CNY".into() }
-fn default_ai_provider() -> String { "chatgpt".into() }
-fn default_max_position_pct() -> f64 { 0.50 }
-fn default_slippage_bps() -> f64 { 5.0 }
-fn default_fee_rate_bps() -> f64 { 3.0 }
-fn default_sell_extra_fee_rate_bps() -> f64 { 5.0 }
-fn default_min_fee() -> f64 { 5.0 }
+fn default_currency() -> String {
+    "CNY".into()
+}
+fn default_ai_provider() -> String {
+    "chatgpt".into()
+}
+fn default_max_position_pct() -> f64 {
+    0.50
+}
+fn default_slippage_bps() -> f64 {
+    5.0
+}
+fn default_fee_rate_bps() -> f64 {
+    3.0
+}
+fn default_sell_extra_fee_rate_bps() -> f64 {
+    5.0
+}
+fn default_min_fee() -> f64 {
+    5.0
+}
 
 async fn create(
     State(state): State<AppState>,
@@ -158,11 +201,21 @@ async fn create(
             .map_err(|_| ApiError::bad_request("start_date must be YYYY-MM-DD"))?,
         None => OffsetDateTime::now_utc().date(),
     };
-    if !body.max_position_pct.is_finite() || body.max_position_pct <= 0.0 || body.max_position_pct > 1.0 {
-        return Err(ApiError::bad_request("max_position_pct must be greater than 0 and at most 1"));
+    if !body.max_position_pct.is_finite()
+        || body.max_position_pct <= 0.0
+        || body.max_position_pct > 1.0
+    {
+        return Err(ApiError::bad_request(
+            "max_position_pct must be greater than 0 and at most 1",
+        ));
     }
-    if body.max_order_value.is_some_and(|value| !value.is_finite() || value < 0.0) {
-        return Err(ApiError::bad_request("max_order_value must be zero or positive"));
+    if body
+        .max_order_value
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Err(ApiError::bad_request(
+            "max_order_value must be zero or positive",
+        ));
     }
     for (label, value) in [
         ("slippage_bps", body.slippage_bps),
@@ -170,7 +223,9 @@ async fn create(
         ("sell_extra_fee_rate_bps", body.sell_extra_fee_rate_bps),
     ] {
         if !value.is_finite() || !(0.0..=1000.0).contains(&value) {
-            return Err(ApiError::bad_request(&format!("{label} must be between 0 and 1000")));
+            return Err(ApiError::bad_request(&format!(
+                "{label} must be between 0 and 1000"
+            )));
         }
     }
     if !body.min_fee.is_finite() || body.min_fee < 0.0 {
@@ -178,22 +233,26 @@ async fn create(
     }
 
     let max_order_value = body.max_order_value.unwrap_or(body.initial_cash * 0.30);
-    let strategy = store::create_strategy(&state.pool, store::NewStrategy {
-        user_id: user.id,
-        name,
-        ai_provider: body.ai_provider.trim(),
-        model: body.model.trim(),
-        prompt_version: body.prompt_version.trim(),
-        currency: &currency,
-        start_date,
-        initial_cash: body.initial_cash,
-        max_position_pct: body.max_position_pct,
-        max_order_value,
-        slippage_bps: body.slippage_bps,
-        fee_rate_bps: body.fee_rate_bps,
-        sell_extra_fee_rate_bps: body.sell_extra_fee_rate_bps,
-        min_fee: body.min_fee,
-    }).await?;
+    let strategy = store::create_strategy(
+        &state.pool,
+        store::NewStrategy {
+            user_id: user.id,
+            name,
+            ai_provider: body.ai_provider.trim(),
+            model: body.model.trim(),
+            prompt_version: body.prompt_version.trim(),
+            currency: &currency,
+            start_date,
+            initial_cash: body.initial_cash,
+            max_position_pct: body.max_position_pct,
+            max_order_value,
+            slippage_bps: body.slippage_bps,
+            fee_rate_bps: body.fee_rate_bps,
+            sell_extra_fee_rate_bps: body.sell_extra_fee_rate_bps,
+            min_fee: body.min_fee,
+        },
+    )
+    .await?;
     Ok(Json(json!({ "strategy": strategy })))
 }
 
@@ -212,7 +271,9 @@ async fn update_strategy(
 ) -> Result<Json<Value>, ApiError> {
     owned_strategy(&state.pool, id, user.id).await?;
     if !matches!(body.status.as_str(), "active" | "paused" | "ended") {
-        return Err(ApiError::bad_request("status must be active, paused or ended"));
+        return Err(ApiError::bad_request(
+            "status must be active, paused or ended",
+        ));
     }
     let strategy = store::set_strategy_status(&state.pool, id, user.id, &body.status)
         .await?
@@ -227,7 +288,9 @@ async fn detail(
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
     let (portfolio, _views, account) = build_context(&state, &strategy).await?;
-    Ok(Json(json!({ "strategy": strategy, "portfolio": portfolio, "account": account })))
+    Ok(Json(
+        json!({ "strategy": strategy, "portfolio": portfolio, "account": account }),
+    ))
 }
 
 async fn context(
@@ -237,7 +300,9 @@ async fn context(
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
     let (portfolio, _views, account) = build_context(&state, &strategy).await?;
-    Ok(Json(json!({ "strategy": strategy, "portfolio": portfolio, "account": account })))
+    Ok(Json(
+        json!({ "strategy": strategy, "portfolio": portfolio, "account": account }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -282,10 +347,14 @@ async fn add_asset(
         return Err(ApiError::conflict("cannot add assets to an ended strategy"));
     }
     if !matches!(body.asset_class.as_str(), "crypto" | "stock" | "etf") {
-        return Err(ApiError::bad_request("asset_class must be crypto, stock or etf"));
+        return Err(ApiError::bad_request(
+            "asset_class must be crypto, stock or etf",
+        ));
     }
     if !matches!(body.provider.as_str(), "coingecko" | "yahoo" | "china") {
-        return Err(ApiError::bad_request("provider must be coingecko, yahoo or china"));
+        return Err(ApiError::bad_request(
+            "provider must be coingecko, yahoo or china",
+        ));
     }
     let class_provider_matches = match body.provider.as_str() {
         "coingecko" => body.asset_class == "crypto",
@@ -299,8 +368,16 @@ async fn add_asset(
     if body.provider_id.trim().is_empty() || body.symbol.trim().is_empty() {
         return Err(ApiError::bad_request("provider_id and symbol are required"));
     }
-    let currency = body.currency.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        .unwrap_or(if body.provider == "china" { "CNY" } else { &strategy.currency });
+    let currency = body
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if body.provider == "china" {
+            "CNY"
+        } else {
+            &strategy.currency
+        });
     if !CURRENCIES.contains(&currency) {
         return Err(ApiError::bad_request("unsupported asset currency"));
     }
@@ -314,12 +391,18 @@ async fn add_asset(
         body.symbol.trim(),
         body.name.trim(),
         currency,
-    ).await.map_err(order_error)?;
+    )
+    .await
+    .map_err(order_error)?;
     // The quote gate uses the same provider integration as Watchlist/Portfolio.
-    if let Err(error) = market::ensure_identity(&state.pool, &asset.provider, &asset.provider_id).await {
+    if let Err(error) =
+        market::ensure_identity(&state.pool, &asset.provider, &asset.provider_id).await
+    {
         tracing::warn!("initial paper quote for {} failed: {error:#}", asset.symbol);
     }
-    let asset = portfolios::get_asset(&state.pool, asset.id).await?.unwrap_or(asset);
+    let asset = portfolios::get_asset(&state.pool, asset.id)
+        .await?
+        .unwrap_or(asset);
     Ok(Json(json!({ "asset": asset })))
 }
 
@@ -353,34 +436,47 @@ async fn add_run(
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
     let key = body.idempotency_key.trim();
     if key.is_empty() || key.len() > 128 {
-        return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
+        return Err(ApiError::bad_request(
+            "idempotency_key must be 1-128 characters",
+        ));
     }
     let decision = body.decision.trim();
     if !DECISIONS.contains(&decision) {
         return Err(ApiError::bad_request("invalid decision"));
     }
-    if !body.market_facts.is_object() || !body.market_expectations.is_object() || !body.risk_assessment.is_object() {
-        return Err(ApiError::bad_request("market_facts, market_expectations and risk_assessment must be JSON objects"));
+    if !body.market_facts.is_object()
+        || !body.market_expectations.is_object()
+        || !body.risk_assessment.is_object()
+    {
+        return Err(ApiError::bad_request(
+            "market_facts, market_expectations and risk_assessment must be JSON objects",
+        ));
     }
     if !body.evidence.is_array() {
         return Err(ApiError::bad_request("evidence must be a JSON array"));
     }
     if body.inference.len() > 20_000 {
-        return Err(ApiError::bad_request("inference is too long (max 20000 bytes)"));
+        return Err(ApiError::bad_request(
+            "inference is too long (max 20000 bytes)",
+        ));
     }
     if !(1..=5).contains(&body.confidence) {
         return Err(ApiError::bad_request("confidence must be between 1 and 5"));
     }
     let scheduled_at = match body.scheduled_at.as_deref() {
-        Some(raw) => Some(OffsetDateTime::parse(raw, &Rfc3339)
-            .map_err(|_| ApiError::bad_request("scheduled_at must be RFC3339"))?),
+        Some(raw) => Some(
+            OffsetDateTime::parse(raw, &Rfc3339)
+                .map_err(|_| ApiError::bad_request("scheduled_at must be RFC3339"))?,
+        ),
         None => None,
     };
     let snapshot = if store::get_run_by_key(&state.pool, id, key).await?.is_some() {
         Value::Null // A retry preserves the original frozen snapshot even when quotes/FX are unavailable.
     } else {
         if strategy.status == "ended" {
-            return Err(ApiError::conflict("cannot record new runs for an ended strategy"));
+            return Err(ApiError::conflict(
+                "cannot record new runs for an ended strategy",
+            ));
         }
         build_context(&state, &strategy).await?.2
     };
@@ -398,8 +494,12 @@ async fn add_run(
         &body.evidence,
         &body.risk_assessment,
         &snapshot,
-    ).await.map_err(|error| {
-        if error.to_string().contains("idempotency key already used") || error.to_string().contains("ended strategy") {
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("idempotency key already used")
+            || error.to_string().contains("ended strategy")
+        {
             ApiError::conflict(&error.to_string())
         } else {
             tracing::error!("creating paper run failed: {error:#}");
@@ -439,15 +539,24 @@ async fn place_order(
         return Err(ApiError::bad_request("side must be buy or sell"));
     }
     if !body.quantity.is_finite() || body.quantity <= 0.0 {
-        return Err(ApiError::bad_request("quantity must be a positive finite number"));
+        return Err(ApiError::bad_request(
+            "quantity must be a positive finite number",
+        ));
     }
     if key.is_empty() || key.len() > 128 {
-        return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
+        return Err(ApiError::bad_request(
+            "idempotency_key must be 1-128 characters",
+        ));
     }
     if body.note.len() > 1000 {
-        return Err(ApiError::bad_request("note is too long (max 1000 characters)"));
+        return Err(ApiError::bad_request(
+            "note is too long (max 1000 characters)",
+        ));
     }
-    if store::get_order_by_key(&state.pool, strategy.id, key).await?.is_none() {
+    if store::get_order_by_key(&state.pool, strategy.id, key)
+        .await?
+        .is_none()
+    {
         let assets = portfolios::list_assets(&state.pool, strategy.portfolio_id).await?;
         market::ensure_portfolio_assets(&state.pool, &assets).await?;
     }
@@ -461,13 +570,17 @@ async fn place_order(
         side,
         body.quantity,
         body.note.trim(),
-    ).await.map_err(order_error)?;
+    )
+    .await
+    .map_err(order_error)?;
     Ok(Json(json!({ "order": order })))
 }
 
 fn order_error(error: store::OrderError) -> ApiError {
     match error {
-        store::OrderError::NotFound => ApiError::not_found("paper strategy, run or asset not found"),
+        store::OrderError::NotFound => {
+            ApiError::not_found("paper strategy, run or asset not found")
+        }
         store::OrderError::Invalid(message) => ApiError::bad_request(&message),
         store::OrderError::Conflict(message) => ApiError::conflict(&message),
         store::OrderError::Internal(error) => {
@@ -513,10 +626,20 @@ mod tests {
         let valid = json!({"idempotency_key":"order-1", "run_id":Uuid::new_v4(),
             "asset_id":Uuid::new_v4(), "side":"buy", "quantity":10.0});
         assert!(serde_json::from_value::<PlaceOrderBody>(valid.clone()).is_ok());
-        for field in ["price", "fill_price", "fee", "portfolio_id", "user_id", "quote_at"] {
+        for field in [
+            "price",
+            "fill_price",
+            "fee",
+            "portfolio_id",
+            "user_id",
+            "quote_at",
+        ] {
             let mut body = valid.clone();
             body[field] = json!(1);
-            assert!(serde_json::from_value::<PlaceOrderBody>(body).is_err(), "accepted {field}");
+            assert!(
+                serde_json::from_value::<PlaceOrderBody>(body).is_err(),
+                "accepted {field}"
+            );
         }
     }
 
@@ -528,5 +651,4 @@ mod tests {
         assert!(serde_json::from_value::<CreateRunBody>(body).is_err());
     }
 }
-
 

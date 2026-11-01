@@ -41,7 +41,10 @@ mod date_iso {
     use serde::Serializer;
     use time::{format_description::well_known::Iso8601, Date};
     pub fn serialize<S: Serializer>(d: &Date, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&d.format(&Iso8601::DATE).map_err(serde::ser::Error::custom)?)
+        s.serialize_str(
+            &d.format(&Iso8601::DATE)
+                .map_err(serde::ser::Error::custom)?,
+        )
     }
 }
 
@@ -107,7 +110,11 @@ pub async fn mark_pending(pool: &PgPool, date: Date, reason: &str) -> anyhow::Re
 /// The most recent USD→quote rate on or before `date` (carry-forward), falling back to the
 /// oldest stored rate when `date` predates our coverage. `None` only when the quote has no
 /// rate at all.
-async fn usd_rate_on(conn: &mut sqlx::PgConnection, quote: &str, date: Date) -> anyhow::Result<Option<f64>> {
+async fn usd_rate_on(
+    conn: &mut sqlx::PgConnection,
+    quote: &str,
+    date: Date,
+) -> anyhow::Result<Option<f64>> {
     // Carry-forward: the newest rate on/before the date. Failing that (the date predates our
     // whole history, e.g. a net-worth chart reaching back further than the FX table), carry
     // the oldest rate *backward* instead. Returning None there would silently drop the asset
@@ -188,7 +195,8 @@ impl FxCache {
         to: &str,
         date: Date,
     ) -> anyhow::Result<Option<f64>> {
-        self.convert_on(&mut *pool.acquire().await?, amount, from, to, date).await
+        self.convert_on(&mut *pool.acquire().await?, amount, from, to, date)
+            .await
     }
 
     /// Same conversion on an existing connection, including an execution transaction.
@@ -205,8 +213,16 @@ impl FxCache {
         }
         // Rate of 1 unit of `cur` in USD: USD→cur is stored, so 1 cur = 1/rate USD.
         // We instead express everything via USD→cur and cross-divide.
-        let from_rate = if from == "USD" { Some(1.0) } else { self.usd_rate(conn, from, date).await? };
-        let to_rate = if to == "USD" { Some(1.0) } else { self.usd_rate(conn, to, date).await? };
+        let from_rate = if from == "USD" {
+            Some(1.0)
+        } else {
+            self.usd_rate(conn, from, date).await?
+        };
+        let to_rate = if to == "USD" {
+            Some(1.0)
+        } else {
+            self.usd_rate(conn, to, date).await?
+        };
         match (from_rate, to_rate) {
             (Some(fr), Some(tr)) if fr != 0.0 => {
                 // amount in `from`; to USD = amount / fr (since 1 USD = fr from);
@@ -223,11 +239,10 @@ impl FxCache {
 /// The most recent date for which we have any stored rate, or `None` if the table is empty.
 pub async fn latest_rate_date(pool: &PgPool) -> anyhow::Result<Option<Date>> {
     // MAX over an empty table yields one NULL row, so decode the column as Option.
-    let row: (Option<Date>,) =
-        sqlx::query_as("SELECT MAX(rate_date) FROM journal_fx_rates")
-            .fetch_one(pool)
-            .await
-            .context("reading latest fx date")?;
+    let row: (Option<Date>,) = sqlx::query_as("SELECT MAX(rate_date) FROM journal_fx_rates")
+        .fetch_one(pool)
+        .await
+        .context("reading latest fx date")?;
     Ok(row.0)
 }
 
@@ -271,7 +286,10 @@ pub async fn list_pending(pool: &PgPool) -> anyhow::Result<Vec<FxPending>> {
     .context("listing fx pending")?;
     Ok(rows
         .into_iter()
-        .map(|(pending_date, reason)| FxPending { pending_date, reason })
+        .map(|(pending_date, reason)| FxPending {
+            pending_date,
+            reason,
+        })
         .collect())
 }
 
@@ -304,7 +322,12 @@ pub async fn rates_on(pool: &PgPool, date: Date) -> anyhow::Result<Vec<FxRate>> 
     .context("reading rates for date")?;
     Ok(rows
         .into_iter()
-        .map(|(rate_date, quote, rate, source)| FxRate { rate_date, quote, rate, source })
+        .map(|(rate_date, quote, rate, source)| FxRate {
+            rate_date,
+            quote,
+            rate,
+            source,
+        })
         .collect())
 }
 
@@ -325,7 +348,12 @@ pub async fn rates_asof(pool: &PgPool, date: Date) -> anyhow::Result<Vec<FxRate>
     .context("reading rates as-of date")?;
     Ok(rows
         .into_iter()
-        .map(|(rate_date, quote, rate, source)| FxRate { rate_date, quote, rate, source })
+        .map(|(rate_date, quote, rate, source)| FxRate {
+            rate_date,
+            quote,
+            rate,
+            source,
+        })
         .collect())
 }
 
@@ -333,5 +361,4 @@ pub async fn rates_asof(pool: &PgPool, date: Date) -> anyhow::Result<Vec<FxRate>
 pub fn yesterday_utc() -> Date {
     (OffsetDateTime::now_utc() - time::Duration::days(1)).date()
 }
-
 

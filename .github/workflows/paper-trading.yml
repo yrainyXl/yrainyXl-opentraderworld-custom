@@ -3,8 +3,10 @@ name: Paper Trading backend
 on:
   pull_request:
     branches: [main]
+    paths: ['core/**', 'scripts/cargo-check.sh', '.github/workflows/paper-trading.yml']
   push:
     branches: [feature/paper-trading-agent]
+    paths: ['core/**', 'scripts/cargo-check.sh', '.github/workflows/paper-trading.yml']
 
 permissions:
   contents: read
