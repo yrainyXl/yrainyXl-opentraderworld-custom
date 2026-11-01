@@ -1,0 +1,56 @@
+name: Paper Trading backend
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feature/paper-trading-agent]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paper-trading-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: paper_test
+          POSTGRES_PASSWORD: paper_test
+          POSTGRES_DB: paper_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U paper_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check using the repository toolchain and cache volumes
+        run: scripts/cargo-check.sh
+      - name: Format changed paper execution sources
+        run: |
+          docker run --rm -v "$PWD:/build" -w /build rust:1.98.0-slim bash -c '
+            rustup component add rustfmt
+            rustfmt --edition 2021 --config skip_children=true core/otw-store/src/paper_trading.rs core/otw-store/src/portfolios.rs core/otw-store/src/journal_fx.rs core/otw-store/tests/paper_trading.rs core/otw-core/src/paper_trading_api.rs
+          '
+          git diff --exit-code
+      - name: Unit, database and regression tests on disposable PostgreSQL
+        env:
+          DATABASE_URL: postgres://paper_test:paper_test@localhost:5432/paper_test
+        run: |
+          docker run --rm --network host -e DATABASE_URL \
+            -e CARGO_TARGET_DIR=/target -v "$PWD:/build:ro" \
+            -v otw-check-cargo:/usr/local/cargo -v otw-check-target:/target \
+            -w /build/core rust:1.98.0-slim \
+            cargo test -p otw-store --lib --test paper_trading --test market_quotes --test oauth --test price_observations
+          docker run --rm -e CARGO_TARGET_DIR=/target -v "$PWD:/build:ro" \
+            -v otw-check-cargo:/usr/local/cargo -v otw-check-target:/target \
+            -w /build/core rust:1.98.0-slim \
+            cargo test -p otw-core --bin otw-core
