@@ -141,7 +141,7 @@ async fn protected_resource_metadata(State(state): State<AppState>) -> Response 
         json!({
             "resource": resource_url(&base),
             "authorization_servers": [base],
-            "scopes_supported": [SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS],
+            "scopes_supported": [SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS],
             "bearer_methods_supported": ["header"],
             "resource_name": "OpenTraderWorld MCP",
             "resource_documentation": base,
@@ -171,7 +171,7 @@ async fn authorization_server_metadata(State(state): State<AppState>) -> Respons
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": [SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS],
+            "scopes_supported": [SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS],
             // RFC 9207: the client must verify `iss` on the callback.
             "authorization_response_iss_parameter_supported": true,
             "service_documentation": base,
