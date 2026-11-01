@@ -1,6 +1,6 @@
 # Paper Trading Agent — Phase 1/2 Design
 
-Status: implementation target for `feature/paper-trading-agent`.
+Status: backend implemented and tested on `feature/paper-trading-agent`; draft PR, no deployment.
 
 ## Goal
 
@@ -191,7 +191,7 @@ Paper positions stay visible in their Portfolio page and Paper Trading context, 
 
 Phase 1/2 backend covers strategy isolation, account context, run logging, safe paper execution, idempotency and MCP authorization.
 
-Implementation status: the migration, store, REST API, MCP catalog/scope and Research/Portfolio guards have been added on `feature/paper-trading-agent`. Compilation, automated tests and deployment are still pending.
+Implementation status: the migration, store, REST API, MCP catalog/scope and Research/Portfolio guards are implemented on `feature/paper-trading-agent`. Compilation and backend tests passed in the pinned Rust environment against disposable PostgreSQL. See [the validation report](PAPER_TRADING_VALIDATION.md) for exact files, commits, counts and the final formatting/test workflow. No production migration, deployment or merge was performed. Live provider/ChatGPT scheduled-task smoke testing remains outside this backend PR.
 
 Not included yet:
 
@@ -202,5 +202,3 @@ Not included yet:
 - strategy comparison UI;
 - automated performance reports;
 - Journal duplication of Portfolio operations.
-
-
