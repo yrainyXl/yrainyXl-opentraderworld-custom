@@ -34,6 +34,7 @@ One strategy = one isolated paper portfolio.
 - model
 - prompt_version
 - currency
+- start_date (allows an experiment to be initialized with its actual historical start date)
 - initial_cash
 - status: active | paused | ended
 - max_position_pct
