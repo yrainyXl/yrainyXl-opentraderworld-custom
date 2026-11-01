@@ -69,7 +69,7 @@ async fn build_context(
     let equity = complete.then_some(cash + market_value);
     let snapshot = json!({
         "currency": strategy.currency,
-        "start_date": strategy.start_date,
+        "start_date": strategy.start_date.to_string(),
         "initial_cash": strategy.initial_cash,
         "cash": cash,
         "market_value": market_value,
