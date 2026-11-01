@@ -22,6 +22,8 @@ pub struct PaperStrategy {
     pub model: String,
     pub prompt_version: String,
     pub currency: String,
+    #[serde(with = "date_fmt")]
+    pub start_date: Date,
     pub initial_cash: f64,
     pub status: String,
     pub max_position_pct: f64,
@@ -96,6 +98,7 @@ pub struct NewStrategy<'a> {
     pub model: &'a str,
     pub prompt_version: &'a str,
     pub currency: &'a str,
+    pub start_date: Date,
     pub initial_cash: f64,
     pub max_position_pct: f64,
     pub max_order_value: f64,
@@ -126,10 +129,10 @@ pub async fn create_strategy(pool: &PgPool, input: NewStrategy<'_>) -> anyhow::R
 
     let strategy = sqlx::query_as::<_, PaperStrategy>(
         "INSERT INTO paper_trading_strategies \
-         (id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, initial_cash, \
+         (id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, start_date, initial_cash, \
           max_position_pct, max_order_value, slippage_bps, fee_rate_bps, sell_extra_fee_rate_bps, min_fee) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) \
-         RETURNING id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, initial_cash, \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+         RETURNING id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, start_date, initial_cash, \
                    status, max_position_pct, max_order_value, slippage_bps, fee_rate_bps, \
                    sell_extra_fee_rate_bps, min_fee, created_at, updated_at",
     )
@@ -141,6 +144,7 @@ pub async fn create_strategy(pool: &PgPool, input: NewStrategy<'_>) -> anyhow::R
     .bind(input.model.trim())
     .bind(input.prompt_version.trim())
     .bind(input.currency)
+    .bind(input.start_date)
     .bind(input.initial_cash)
     .bind(input.max_position_pct)
     .bind(input.max_order_value)
@@ -156,7 +160,7 @@ pub async fn create_strategy(pool: &PgPool, input: NewStrategy<'_>) -> anyhow::R
     Ok(strategy)
 }
 
-const STRATEGY_COLS: &str = "id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, initial_cash, status, max_position_pct, max_order_value, slippage_bps, fee_rate_bps, sell_extra_fee_rate_bps, min_fee, created_at, updated_at";
+const STRATEGY_COLS: &str = "id, user_id, portfolio_id, name, ai_provider, model, prompt_version, currency, start_date, initial_cash, status, max_position_pct, max_order_value, slippage_bps, fee_rate_bps, sell_extra_fee_rate_bps, min_fee, created_at, updated_at";
 
 pub async fn list_strategies(pool: &PgPool, user_id: Uuid) -> anyhow::Result<Vec<PaperStrategy>> {
     let sql = format!("SELECT {STRATEGY_COLS} FROM paper_trading_strategies WHERE user_id = $1 ORDER BY created_at DESC");
@@ -492,6 +496,9 @@ pub async fn execute_order(
     }
 
     let today = now.date();
+    if today < strategy.start_date {
+        return Err(OrderError::Conflict("paper strategy start date is in the future".into()));
+    }
     let quote_native = journal_fx::convert(pool, quote_price_usd, "USD", &asset.currency, today)
         .await?
         .ok_or_else(|| OrderError::Invalid(format!("missing FX rate from USD to {}", asset.currency)))?;
