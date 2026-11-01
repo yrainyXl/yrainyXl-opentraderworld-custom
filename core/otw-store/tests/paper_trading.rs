@@ -69,6 +69,12 @@ async fn fill_uses_server_quote_and_portfolio_ledger_cash_with_fees() {
     assert_eq!(filled.fill_price, 10.0);
     assert_eq!(filled.fee, 2.0);
     assert_eq!(paper::cash_balance(&p, &s).await.unwrap(), 898.0);
+    portfolios::set_asset_price(&p, a.id, 999999.0).await.unwrap();
+    let (views, cash, complete) = paper::account_values(&p, &s).await.unwrap();
+    assert_eq!(cash, 898.0);
+    assert!(complete);
+    assert_eq!(views[0].quantity, 10.0);
+    assert_eq!(views[0].price, Some(10.0), "paper marks must use shared quotes even if a local price is newer");
     let op = portfolios::list_operations(&p, a.id).await.unwrap();
     assert_eq!(op[0].id, filled.operation_id);
     assert_eq!(op[0].quantity, 10.0);
@@ -91,6 +97,7 @@ async fn retries_survive_stale_quotes_and_terminal_status_without_duplicate_oper
     let retry = order(&p, &s, &r, &a, "same", "buy", 5.0).await.unwrap();
     assert_eq!(first.id, retry.id);
     assert_eq!(first.fill_price, retry.fill_price);
+    assert!(matches!(paper::execute_order(&p, s.user_id, s.id, r.id, a.id, "same", "buy", 5.0, "changed note").await, Err(paper::OrderError::Conflict(_))));
     assert!(matches!(order(&p, &s, &r, &a, "same", "buy", 5.0000000001).await, Err(paper::OrderError::Conflict(_))));
     assert_eq!(run(&p, &s, "run", "buy").await.id, r.id);
     assert!(paper::set_strategy_status(&p, s.id, s.user_id, "active").await.unwrap().is_none());
@@ -273,5 +280,42 @@ async fn account_cash_uses_operation_date_fx() {
     assert_eq!(fill.fill_price, 70.0);
     assert_eq!(fill.fee_currency, "CNY");
     assert_eq!(paper::cash_balance(&p, &s).await.unwrap(), 900.0);
+}
+
+#[tokio::test]
+async fn slippage_commission_and_sell_levy_are_applied_server_side() {
+    let p = pool().await;
+    let s = strategy(&p, 10_000.0, 1.0, 0.0, 5.0).await;
+    sqlx::query("UPDATE paper_trading_strategies SET slippage_bps = 5, fee_rate_bps = 3, sell_extra_fee_rate_bps = 5 WHERE id = $1")
+        .bind(s.id).execute(&p).await.unwrap();
+    let a = asset(&p, &s, "yahoo", "USD").await;
+    let buy = run(&p, &s, "buy", "buy").await;
+    let fill = order(&p, &s, &buy, &a, "buy", "buy", 10.0).await.unwrap();
+    assert!((fill.fill_price - 10.005).abs() < 1e-9);
+    assert_eq!(fill.fee, 5.0);
+    let sell = run(&p, &s, "sell", "exit").await;
+    let fill = order(&p, &s, &sell, &a, "sell", "sell", 10.0).await.unwrap();
+    assert!((fill.fill_price - 9.995).abs() < 1e-9);
+    assert!((fill.fee - 5.049975).abs() < 1e-9);
+    assert!((paper::cash_balance(&p, &s).await.unwrap() - 9989.850025).abs() < 1e-8);
+}
+
+#[tokio::test]
+async fn oauth_paper_permission_remains_opt_in_and_survives_refresh_without_widening() {
+    use otw_store::oauth;
+    let p = pool().await;
+    let s = strategy(&p, 1000.0, 1.0, 0.0, 0.0).await;
+    let (client, _) = oauth::create_client(&p, "paper test", &["https://client.example/callback".into()],
+        &[oauth::SCOPE_MCP_READ.into(), oauth::SCOPE_MCP_PAPER_TRADE.into()], "pre_registered").await.unwrap();
+    let read = oauth::issue_tokens(&p, client.id, s.user_id, "https://otw.example/api/mcp", &[oauth::SCOPE_MCP_READ.into()]).await.unwrap();
+    let row = oauth::find_access_token(&p, &read.access_token).await.unwrap().unwrap();
+    assert!(!row.has_scope(oauth::SCOPE_MCP_PAPER_TRADE));
+    let paper = oauth::issue_tokens(&p, client.id, s.user_id, "https://otw.example/api/mcp",
+        &[oauth::SCOPE_MCP_READ.into(), oauth::SCOPE_MCP_PAPER_TRADE.into()]).await.unwrap();
+    let refreshed = oauth::rotate_refresh(&p, &paper.refresh_token, client.id, "https://otw.example/api/mcp").await.unwrap().unwrap();
+    let row = oauth::find_access_token(&p, &refreshed.access_token).await.unwrap().unwrap();
+    assert!(row.has_scope(oauth::SCOPE_MCP_PAPER_TRADE));
+    assert!(!row.has_scope("portfolios:rw"));
+    assert_eq!(row.scopes.len(), 2);
 }
 

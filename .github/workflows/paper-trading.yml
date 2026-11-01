@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: paper-trading-${{ github.ref }}
+  group: paper-trading-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

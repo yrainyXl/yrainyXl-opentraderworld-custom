@@ -80,6 +80,7 @@ pub struct PaperOrderView {
     pub fill_price: f64,
     pub fee: f64,
     pub fee_currency: String,
+    pub note: String,
     #[serde(with = "date_fmt")]
     pub op_date: Date,
     pub symbol: String,
@@ -399,7 +400,7 @@ pub async fn list_runs(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow::
     .context("listing paper runs")?)
 }
 
-const ORDER_VIEW_SELECT: &str = "SELECT po.id, po.strategy_id, po.run_id, po.asset_id, po.idempotency_key, po.side, po.requested_quantity, po.quote_price_usd, po.quote_at, po.slippage_bps, po.operation_id, po.created_at, op.price AS fill_price, op.fee, a.currency AS fee_currency, op.op_date, a.symbol FROM paper_trading_orders po JOIN portfolio_operations op ON op.id = po.operation_id JOIN portfolio_assets a ON a.id = po.asset_id";
+const ORDER_VIEW_SELECT: &str = "SELECT po.id, po.strategy_id, po.run_id, po.asset_id, po.idempotency_key, po.side, po.requested_quantity, po.quote_price_usd, po.quote_at, po.slippage_bps, po.operation_id, po.created_at, op.price AS fill_price, op.fee, a.currency AS fee_currency, op.note, op.op_date, a.symbol FROM paper_trading_orders po JOIN portfolio_operations op ON op.id = po.operation_id JOIN portfolio_assets a ON a.id = po.asset_id";
 
 pub async fn list_orders(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow::Result<Vec<PaperOrderView>> {
     let sql = format!("{ORDER_VIEW_SELECT} WHERE po.strategy_id = $1 ORDER BY po.created_at DESC LIMIT $2");
@@ -413,6 +414,35 @@ pub async fn list_orders(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow
 
 pub async fn cash_balance(pool: &PgPool, strategy: &PaperStrategy) -> anyhow::Result<f64> {
     cash_balance_on(&mut *pool.acquire().await?, strategy).await
+}
+
+/// A coherent paper context from the Portfolio ledger, using only shared quotes.
+/// The strategy lock prevents snapshots combining holdings from before an order
+/// with cash from after it; all database work uses the same connection.
+pub async fn account_values(pool: &PgPool, strategy: &PaperStrategy) -> anyhow::Result<(Vec<portfolios::AssetView>, f64, bool)> {
+    let mut tx = pool.begin().await.context("begin paper context")?;
+    sqlx::query("SELECT id FROM paper_trading_strategies WHERE id = $1 AND user_id = $2 FOR SHARE")
+        .bind(strategy.id).bind(strategy.user_id).fetch_one(&mut *tx).await.context("locking paper context")?;
+    let assets = portfolios::list_assets_on(&mut tx, strategy.portfolio_id).await?;
+    let today = OffsetDateTime::now_utc().date();
+    let mut fx = journal_fx::FxCache::new();
+    let fx_available = fx.convert_on(&mut tx, 1.0, "USD", &strategy.currency, today).await?
+        .is_some_and(|rate| rate.is_finite() && rate > 0.0);
+    let mut views = Vec::with_capacity(assets.len());
+    for mut asset in assets {
+        let quote: Option<(f64, OffsetDateTime)> = sqlx::query_as(
+            "SELECT price_usd, quote_at FROM market_quotes WHERE provider = $1 AND provider_id = $2",
+        ).bind(&asset.provider).bind(&asset.provider_id).fetch_optional(&mut *tx).await
+            .context("reading paper context quote")?;
+        let ops = portfolios::list_operations_on(&mut tx, asset.id).await?;
+        // Portfolio fallback prices are useful for display, but are not paper marks.
+        asset.last_price_usd = None;
+        asset.last_price_at = None;
+        views.push(portfolios::asset_view_on(&mut tx, asset, &ops, &strategy.currency, today, quote).await?);
+    }
+    let cash = cash_balance_on(&mut tx, strategy).await?;
+    tx.commit().await.context("commit paper context")?;
+    Ok((views, cash, fx_available))
 }
 
 async fn cash_balance_on(conn: &mut sqlx::PgConnection, strategy: &PaperStrategy) -> anyhow::Result<f64> {
@@ -459,6 +489,14 @@ impl From<anyhow::Error> for OrderError {
 
 fn fee_for_order(notional: f64, rate_bps: f64, min_fee: f64) -> f64 {
     (notional * rate_bps / 10_000.0).max(min_fee)
+}
+
+fn operation_date(provider: &str, now: OffsetDateTime) -> Date {
+    if provider == "china" {
+        now.to_offset(time::UtcOffset::from_hms(8, 0, 0).expect("China UTC offset")).date()
+    } else {
+        now.date()
+    }
 }
 
 /// China A-share stocks follow T+1: shares bought today are not sellable today. Same-day
@@ -510,11 +548,18 @@ pub async fn execute_order(
         .context("locking paper strategy")?
         .ok_or(OrderError::NotFound)?;
 
+    let op_note = if note.trim().is_empty() {
+        format!("Paper Trading strategy {} run {}", strategy.name, run_id)
+    } else {
+        format!("Paper Trading: {}", note.trim())
+    };
+
     if let Some(existing) = find_order_by_key_tx(&mut tx, strategy_id, idempotency_key).await? {
         if existing.run_id != run_id
             || existing.asset_id != asset_id
             || existing.side != side
             || existing.requested_quantity != quantity
+            || existing.note != op_note
         {
             return Err(OrderError::Conflict("idempotency key was already used for a different order".into()));
         }
@@ -567,7 +612,7 @@ pub async fn execute_order(
         return Err(OrderError::Conflict("market quote is stale; refresh the strategy context and retry".into()));
     }
 
-    let today = now.date();
+    let today = operation_date(&asset.provider, now);
     if today < strategy.start_date {
         return Err(OrderError::Conflict("paper strategy start date is in the future".into()));
     }
@@ -666,7 +711,9 @@ pub async fn execute_order(
         return Err(OrderError::Invalid("add decision requires an existing position; use buy".into()));
     }
     if side == "sell" {
-        let sellable = if asset.provider == "china" && asset.asset_class == "stock" {
+        // Until Market provides authoritative settlement metadata, all China
+        // instruments use conservative T+1. Client asset_class must not disable it.
+        let sellable = if asset.provider == "china" {
             china_sellable_quantity(&operations_by_asset[&asset_id], today)
         } else {
             target_quantity
@@ -714,11 +761,6 @@ pub async fn execute_order(
 
     let operation_id = Uuid::new_v4();
     let order_id = Uuid::new_v4();
-    let op_note = if note.trim().is_empty() {
-        format!("Paper Trading strategy {} run {}", strategy.name, run_id)
-    } else {
-        format!("Paper Trading: {}", note.trim())
-    };
     sqlx::query(
         "INSERT INTO portfolio_operations \
          (id, asset_id, portfolio_id, side, op_date, quantity, price, fee, note) \
@@ -792,6 +834,13 @@ async fn find_order_by_id_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn china_operation_date_uses_market_midnight() {
+        let at = time::macros::datetime!(2026-11-01 16:01 UTC);
+        assert_eq!(operation_date("china", at), time::macros::date!(2026-11-02));
+        assert_eq!(operation_date("yahoo", at), time::macros::date!(2026-11-01));
+    }
 
     #[test]
     fn commission_uses_percentage_or_minimum_whichever_is_higher() {

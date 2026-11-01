@@ -150,6 +150,37 @@ It still receives no generic Portfolio write permission and no delete permission
 9. Server inserts the Portfolio operation and paper order atomically.
 10. Retry with the same idempotency key returns the already-created order.
 
+All ledger, position and FX reads during execution use the locked transaction's connection. Portfolio's existing position calculator and Journal FX conversion are reused through connection-taking helpers. This works even with a one-connection pool; waiting orders cannot consume all connections needed by the lock holder.
+
+Existing paper assets cannot change currency or asset class. Order bodies reject unknown fields, including client prices, fees and portfolio/user identifiers. Run bodies reject client account snapshots. An idempotency key reused with a different order quantity, side, run, asset or note, or a different run payload/explicit scheduled time, returns a conflict. Exact retries preserve original fills and snapshots after a strategy ends and do not need a live quote.
+
+China orders use Asia/Shanghai business dates. Until the Market layer supplies trusted settlement metadata, every China instrument conservatively uses T+1; selecting `etf` in the request cannot bypass this. Other providers use UTC business dates. Quotes must be no older than 30 seconds and no more than 5 seconds in the future. Any held instrument without a fresh shared quote blocks new buys; ordinary Portfolio fallback pricing is never an execution quote.
+
+Example session-only strategy setup:
+
+```json
+{"name":"AI experiment","currency":"USD","initial_cash":10000,"model":"configured-model","prompt_version":"v1","max_position_pct":0.5,"max_order_value":3000}
+```
+
+After setup, the agent reads the strategy context, resolves an instrument using `GET /api/paper-trading/search?q=...&kind=stock`, and adds it using the returned provider identity. A no-trade cycle can be recorded with:
+
+```json
+{"idempotency_key":"strategy-cycle-2026-11-02","decision":"no_trade","confidence":3,"market_facts":{},"market_expectations":{},"inference":"Reason for observing","evidence":[],"risk_assessment":{}}
+```
+
+For a `buy`/`add` or `reduce`/`exit` run, `POST .../orders` accepts only `idempotency_key`, `run_id`, `asset_id`, `side`, `quantity` and optional `note`. Quantity is asset units, max-order-value is in strategy currency, max-position-percent is a fraction, and fee/slippage rates are basis points. `min_fee` is in the asset currency. Fills are immediate simulated market fills, without exchange session, holiday, lot-size or order-book modeling. This is an experiment ledger, not exchange execution emulation.
+
+Run the repository check first, then targeted tests against a **disposable** PostgreSQL database:
+
+```sh
+scripts/cargo-check.sh
+# Within the pinned Rust environment, with DATABASE_URL set to the disposable DB:
+cargo test -p otw-store --lib --test paper_trading --test market_quotes --test oauth --test price_observations
+cargo test -p otw-core --bin otw-core
+```
+
+`.github/workflows/paper-trading.yml` provides that environment without using production credentials. The new paper database suite fails when DATABASE_URL is missing; its tests never silently skip. The workflow does not deploy, route broker orders, or write production portfolios.
+
 ## Research isolation
 
 Investment Case position aggregation must exclude any `portfolio_assets` whose `portfolio_id` is bound by `paper_trading_strategies`.
@@ -171,3 +202,5 @@ Not included yet:
 - strategy comparison UI;
 - automated performance reports;
 - Journal duplication of Portfolio operations.
+
+

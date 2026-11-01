@@ -444,13 +444,15 @@
   - `core/otw-store/src/investment_cases.rs`、`investment_cases_api.rs`
   - `core/otw-core/src/portfolios_api.rs`、`portfolios_import_api.rs`
   - `CUSTOM_ARCHITECTURE.md`
+  - `core/otw-store/src/portfolios.rs`、`journal_fx.rs`（复用原计算与 FX 语义的事务连接入口）
+  - `core/otw-store/tests/paper_trading.rs`、`.github/workflows/paper-trading.yml`
 - **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表并记录实验 `start_date`；仅扩展现有 OAuth client 的 allowed-scope 列表以允许其请求 `mcp:paper-trade`，不修改任何既有 grant，不改写既有 Portfolio ledger。
 - **API**：
   - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio（可指定历史 `start_date`）；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
   - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
   - MCP paper-trade scope 可写：添加资产、记录 AI run、提交模拟订单。
 - **验证状态**：当前只在 `feature/paper-trading-agent` 分支提交代码和单元测试；**尚未运行 Rust 编译/测试、尚未应用数据库 migration、尚未部署**。需要通过项目规定的 `scripts/cargo-check.sh` 与目标测试后才可部署。
-- **回滚**：部署前可直接丢弃分支。若未来已应用 migration，先停止 Core，在事务中删除 `_sqlx_migrations` 的 version `9000000110`，再删除 `paper_trading_orders`、`paper_trading_runs`、`paper_trading_strategies` 三张表，恢复旧代码并重建 Core。
+- **回滚**：本轮未部署，撤销 PR/分支即可。未来若已应用 migration 并产生模拟成交，不得直接删除 strategy 关联表：失去分类会使模拟持仓进入个人 Research。需要协调恢复部署前备份与旧程序，或保留纸面策略分类及不可变账本并专门实现降级；不提供丢弃模拟账本的自动 down migration。
 - **Upstream 潜在冲突**：中等。涉及 `main.rs` 路由、MCP Catalog / OAuth scope 与权限映射、Portfolio API 防护、Investment Case 聚合查询；后续 upstream 若改动这些模块需三方合并。
 
 ## 3. Migration 编号登记
@@ -586,3 +588,5 @@ SQLx 0.9 启动校验（`sqlx-core` migrator.rs `validate_applied_migrations`）
 - **镜像**：新 core `a5df3007…`（v0.0.9）；新 frontend `23fcd0d6…`；rollback tags `otw-core:rollback-pre-v0.0.9` / `otw-frontend:rollback-pre-v0.0.9`。
 - **备份**：`/opt/apps/backups/otw-db-pre-v0.0.9-20260901-220807.sql`（136M）。
 - **验证**：cargo check ✓、otw-store 34 tests ✓、otw-core 444 passed ✓、frontend build ✓、冒烟全链路 200（login/watchlist 601118+refresh/portfolio 601118 avg_cost 6.49 unrealized +60.0/editor create-patch-read-delete/automator workflows+schedules+catalog）。
+
+

@@ -273,6 +273,8 @@ Paper Trading 是 Portfolio Tracker 上方的策略与执行控制层，不是�
 - 可用现金由初始资金加上 Portfolio operations 的现金流派生，按操作日期使用现有 FX 语义换算，不另存可漂移的现金余额。
 - Agent 不得提交成交价格或手续费；服务端从 Shared Market Quote 取价，应用滑点/费用模型，并检查现金、可卖数量、单笔金额和单标的仓位上限；China A-share stocks 遵守 T+1，同日买入数量不可当日卖出。
 - Paper Portfolio 只能通过 Paper Trading API 写入；普通 Portfolio 更新/删除/资产操作/成交/导入路径必须拒绝修改模拟账本。
+- 模拟资产的计价币种和资产类别在创建后不可变，重复添加标的不得重新解释历史成交金额。策略状态、资产添加、run 与订单写入共用策略行锁；订单内所有账本/FX 读取复用同一事务连接，不能在持锁时再申请连接池连接。
+- China 模拟成交使用 Asia/Shanghai 业务日期。当前所有 China 标的保守执行 T+1，直到 Market 层能提供权威结算类型；Agent 自填的 asset_class 不得用于绕过结算约束。
 - Investment Case 聚合排除 Paper Portfolio，模拟持仓不能污染个人 Research。
 - 该模块永远不连接真实券商或交易所，不产生真实委托。
 
@@ -1295,3 +1297,5 @@ Decision Record 的快照永远不更新。
 ---
 
 **本文件应长期保留在项目仓库，并随着架构性决策更新。不要把临时 bug 修复、一次性调试日志写进本文件。**
+
+

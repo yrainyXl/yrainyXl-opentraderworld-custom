@@ -52,31 +52,16 @@ async fn build_context(
         .ok_or_else(|| ApiError::not_found("paper portfolio not found"))?;
     let assets = portfolios::list_assets(&state.pool, strategy.portfolio_id).await?;
     market::ensure_portfolio_assets(&state.pool, &assets).await?;
-    let views = portfolios::asset_views(&state.pool, &portfolio).await?;
-    let cash = store::cash_balance(&state.pool, strategy).await?;
+    let (views, cash, account_fx_available) = store::account_values(&state.pool, strategy).await?;
 
     let now = OffsetDateTime::now_utc();
-    let quote_keys: Vec<(String, String)> = assets.iter()
-        .filter(|asset| asset.spot_provider.is_none())
-        .map(|asset| (asset.provider.clone(), asset.provider_id.clone()))
-        .collect();
-    let shared_quotes = otw_store::market_quotes::get_many(&state.pool, &quote_keys).await?;
-    let fresh_quote_keys: std::collections::HashSet<(String, String)> = shared_quotes.into_iter()
-        .filter(|quote| {
-            let age = (now - quote.quote_at).whole_seconds();
-            (-5..=30).contains(&age)
-        })
-        .map(|quote| (quote.provider, quote.provider_id))
-        .collect();
-    let account_fx_available = strategy.currency == "USD"
-        || otw_store::journal_fx::convert(&state.pool, 1.0, "USD", &strategy.currency, now.date()).await?.is_some();
     let mut market_value = 0.0_f64;
     let mut complete = account_fx_available;
     let mut unpriced = if account_fx_available { Vec::new() } else { vec![format!("FX: USD/{} unavailable", strategy.currency)] };
     for view in &views {
         if view.quantity > 0.0 {
             let quote_fresh = view.asset.spot_provider.is_none()
-                && fresh_quote_keys.contains(&(view.asset.provider.clone(), view.asset.provider_id.clone()));
+                && view.asset.last_price_at.is_some_and(|at| (-5..=30).contains(&(now - at).whole_seconds()));
             match view.market_value.filter(|_| quote_fresh) {
                 Some(value) => market_value += value,
                 None => {
