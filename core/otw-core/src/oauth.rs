@@ -18,8 +18,9 @@
 //! * `mcp:read` is read-only. The separate `mcp:paper-trade` opt-in grants write access
 //!   only to the isolated Paper Trading module; normal Portfolio remains read-only.
 //!
-//! OTW is single-user: authorization is limited to admin accounts and the data model does
-//! not provide per-portfolio ownership. See CUSTOM_CHANGES C-017.
+//! OTW's normal business data is single-user: authorization is limited to admin accounts and
+//! normal Portfolio rows do not carry ownership. Paper Trading strategies are user-bound and
+//! expose only their linked isolated paper portfolio through the dedicated module. See C-018.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
