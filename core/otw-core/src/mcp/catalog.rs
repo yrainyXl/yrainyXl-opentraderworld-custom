@@ -246,7 +246,7 @@ pub const CATALOG: &[Endpoint] = &[
     get("paper-trading", "/api/paper-trading/strategies", "List the current user's isolated AI paper-trading strategies."),
     get("paper-trading", "/api/paper-trading/strategies/{id}", "One paper strategy with its linked Portfolio and account totals."),
     get("paper-trading", "/api/paper-trading/strategies/{id}/context", "Fresh paper account context: cash, equity, holdings, quote timestamps and unpriced holdings."),
-    get("paper-trading", "/api/paper-trading/search", "Resolve a priceable asset before adding it. Query: q, kind (crypto|stock|etf)."),
+    get("paper-trading", "/api/paper-trading/search", "Resolve a priceable asset before adding it. Query: q, kind (crypto|stock; stock also returns ETFs)."),
     post("paper-trading", "/api/paper-trading/strategies/{id}/assets", "Add an instrument to this strategy's isolated paper portfolio.", schema::<crate::paper_trading_api::AddAssetBody>),
     get("paper-trading", "/api/paper-trading/strategies/{id}/runs", "List AI analysis runs, including no-trade decisions. Query: limit."),
     post("paper-trading", "/api/paper-trading/strategies/{id}/runs", "Record one AI analysis cycle. Idempotency key prevents duplicate runs; account snapshot is captured server-side.", schema::<crate::paper_trading_api::CreateRunBody>),
