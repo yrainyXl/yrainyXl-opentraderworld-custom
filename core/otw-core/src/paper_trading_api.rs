@@ -209,7 +209,7 @@ async fn search(
 ) -> Result<Json<Value>, ApiError> {
     let hits = match query.kind.as_str() {
         "crypto" => prices::search_crypto(&state.pool, &query.q).await?,
-        "stock" | "etf" => prices::search_stock(&query.q, &query.kind).await?,
+        "stock" => prices::search_stock(&query.q, "stock").await?,
         _ => return Err(ApiError::bad_request("kind must be crypto or stock")),
     };
     Ok(Json(json!({ "results": hits })))
@@ -234,11 +234,23 @@ async fn add_asset(
     Json(body): Json<AddAssetBody>,
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
+    if strategy.status == "ended" {
+        return Err(ApiError::conflict("cannot add assets to an ended strategy"));
+    }
     if !matches!(body.asset_class.as_str(), "crypto" | "stock" | "etf") {
         return Err(ApiError::bad_request("asset_class must be crypto, stock or etf"));
     }
     if !matches!(body.provider.as_str(), "coingecko" | "yahoo" | "china") {
         return Err(ApiError::bad_request("provider must be coingecko, yahoo or china"));
+    }
+    let class_provider_matches = match body.provider.as_str() {
+        "coingecko" => body.asset_class == "crypto",
+        "yahoo" => matches!(body.asset_class.as_str(), "stock" | "etf"),
+        "china" => matches!(body.asset_class.as_str(), "stock" | "etf"),
+        _ => false,
+    };
+    if !class_provider_matches {
+        return Err(ApiError::bad_request("asset_class does not match provider"));
     }
     if body.provider_id.trim().is_empty() || body.symbol.trim().is_empty() {
         return Err(ApiError::bad_request("provider_id and symbol are required"));
