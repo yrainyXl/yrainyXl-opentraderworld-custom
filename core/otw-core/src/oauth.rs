@@ -1088,6 +1088,14 @@ mod tests {
     }
 
     #[test]
+    fn paper_trade_scope_is_supported_but_read_scope_remains_required() {
+        let scopes = parse_scope_list("mcp:read mcp:paper-trade").unwrap();
+        assert!(scopes.iter().any(|s| s == SCOPE_MCP_READ));
+        assert!(scopes.iter().any(|s| s == SCOPE_MCP_PAPER_TRADE));
+        assert!(parse_scope_list("mcp:paper-trade").is_ok());
+    }
+
+    #[test]
     fn html_escaping_covers_dynamic_consent_values() {
         assert_eq!(esc("<script>\"x\"&'"), "&lt;script&gt;&quot;x&quot;&amp;&#39;");
     }
