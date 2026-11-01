@@ -247,10 +247,14 @@ pub async fn list_auto_refresh(pool: &PgPool) -> anyhow::Result<Vec<Portfolio>> 
 // ── Assets ────────────────────────────────────────────────────────────────────
 
 pub async fn list_assets(pool: &PgPool, portfolio_id: Uuid) -> anyhow::Result<Vec<Asset>> {
+    list_assets_on(&mut *pool.acquire().await?, portfolio_id).await
+}
+
+pub(crate) async fn list_assets_on(conn: &mut sqlx::PgConnection, portfolio_id: Uuid) -> anyhow::Result<Vec<Asset>> {
     let sql = format!("SELECT {ASSET_COLS} FROM portfolio_assets WHERE portfolio_id = $1 ORDER BY symbol");
     Ok(sqlx::query_as::<_, Asset>(sqlx::AssertSqlSafe(sql))
         .bind(portfolio_id)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .context("listing assets")?)
 }
@@ -369,12 +373,16 @@ pub async fn set_recon(
 // ── Operations ────────────────────────────────────────────────────────────────
 
 pub async fn list_operations(pool: &PgPool, asset_id: Uuid) -> anyhow::Result<Vec<Operation>> {
+    list_operations_on(&mut *pool.acquire().await?, asset_id).await
+}
+
+pub(crate) async fn list_operations_on(conn: &mut sqlx::PgConnection, asset_id: Uuid) -> anyhow::Result<Vec<Operation>> {
     Ok(sqlx::query_as::<_, Operation>(
         "SELECT id, asset_id, side, op_date, quantity, price, fee, note, created_at \
          FROM portfolio_operations WHERE asset_id = $1 ORDER BY op_date DESC, created_at DESC",
     )
     .bind(asset_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .context("listing operations")?)
 }
@@ -520,6 +528,14 @@ pub(crate) async fn position_usd(
     ops: &[Operation],
     currency: &str,
 ) -> anyhow::Result<(f64, f64, f64)> {
+    position_usd_on(&mut *pool.acquire().await?, ops, currency).await
+}
+
+async fn position_usd_on(
+    conn: &mut sqlx::PgConnection,
+    ops: &[Operation],
+    currency: &str,
+) -> anyhow::Result<(f64, f64, f64)> {
     let chrono = sorted_operations(ops);
     let mut fx = journal_fx::FxCache::new();
     // Resolve every operation's (price, fee) first (async, per-date FX), then run
@@ -530,8 +546,8 @@ pub(crate) async fn position_usd(
             (op.price, op.fee)
         } else {
             (
-                fx.convert(pool, op.price, currency, "USD", op.op_date).await?.unwrap_or(op.price),
-                fx.convert(pool, op.fee, currency, "USD", op.op_date).await?.unwrap_or(op.fee),
+                fx.convert_on(conn, op.price, currency, "USD", op.op_date).await?.unwrap_or(op.price),
+                fx.convert_on(conn, op.fee, currency, "USD", op.op_date).await?.unwrap_or(op.fee),
             )
         };
         resolved.push((price, fee));
@@ -600,6 +616,18 @@ pub(crate) async fn asset_view(
     date: Date,
     quote_override: Option<(f64, OffsetDateTime)>,
 ) -> anyhow::Result<AssetView> {
+    asset_view_on(&mut *pool.acquire().await?, asset, ops, currency, date, quote_override).await
+}
+
+/// Reuses the Portfolio accounting engine inside a paper execution transaction.
+pub(crate) async fn asset_view_on(
+    conn: &mut sqlx::PgConnection,
+    asset: Asset,
+    ops: &[Operation],
+    currency: &str,
+    date: Date,
+    quote_override: Option<(f64, OffsetDateTime)>,
+) -> anyhow::Result<AssetView> {
     // Surface whichever price source won as the row's own (computed) price fields, so the
     // serialized view carries the fresh USD price and its observation time unchanged.
     let asset = match quote_override {
@@ -612,16 +640,16 @@ pub(crate) async fn asset_view(
         None => asset,
     };
 
-    let (qty, basis_usd, realized_usd) = position_usd(pool, ops, &asset.currency).await?;
-    let conv = |usd: f64| async move { journal_fx::convert(pool, usd, "USD", currency, date).await };
+    let (qty, basis_usd, realized_usd) = position_usd_on(conn, ops, &asset.currency).await?;
+    let mut fx = journal_fx::FxCache::new();
 
-    let cost_basis = conv(basis_usd).await?.unwrap_or(basis_usd);
-    let realized = conv(realized_usd).await?.unwrap_or(realized_usd);
+    let cost_basis = fx.convert_on(conn, basis_usd, "USD", currency, date).await?.unwrap_or(basis_usd);
+    let realized = fx.convert_on(conn, realized_usd, "USD", currency, date).await?.unwrap_or(realized_usd);
     let avg_cost = if qty > 0.0 { Some(cost_basis / qty) } else { None };
 
     let (price, market_value, unrealized) = match asset.last_price_usd {
         Some(p) => {
-            let price = conv(p).await?.unwrap_or(p);
+            let price = fx.convert_on(conn, p, "USD", currency, date).await?.unwrap_or(p);
             let mv = price * qty;
             (Some(price), Some(mv), Some(mv - cost_basis))
         }
@@ -972,3 +1000,5 @@ mod quote_pick_tests {
         assert_eq!(p, 10.0);
     }
 }
+
+

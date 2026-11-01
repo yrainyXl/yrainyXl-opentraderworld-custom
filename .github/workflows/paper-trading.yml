@@ -35,6 +35,8 @@ jobs:
       - name: Check using the repository toolchain and cache volumes
         run: scripts/cargo-check.sh
       - name: Format changed paper execution sources
+        id: format
+        continue-on-error: true
         run: |
           docker run --rm -v "$PWD:/build" -w /build rust:1.98.0-slim bash -c '
             rustup component add rustfmt
@@ -54,3 +56,7 @@ jobs:
             -v otw-check-cargo:/usr/local/cargo -v otw-check-target:/target \
             -w /build/core rust:1.98.0-slim \
             cargo test -p otw-core --bin otw-core
+      - name: Require clean formatting
+        if: steps.format.outcome != 'success'
+        run: exit 1
+

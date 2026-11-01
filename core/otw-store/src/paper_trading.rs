@@ -3,7 +3,7 @@
 //! Strategy metadata and AI audit records live here. All actual fills are written to
 //! Portfolio Tracker's portfolio_operations ledger; no second position ledger exists.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::{anyhow, Context};
 use serde::Serialize;
@@ -252,11 +252,53 @@ pub async fn is_paper_operation(pool: &PgPool, operation_id: Uuid) -> anyhow::Re
     Ok(exists)
 }
 
+/// Adding an existing instrument must never re-denominate its operation ledger.
+/// Serialize with orders and status changes using the same strategy lock.
+pub async fn add_strategy_asset(
+    pool: &PgPool,
+    user_id: Uuid,
+    strategy_id: Uuid,
+    asset_class: &str,
+    provider: &str,
+    provider_id: &str,
+    symbol: &str,
+    name: &str,
+    currency: &str,
+) -> Result<portfolios::Asset, OrderError> {
+    let mut tx = pool.begin().await.context("begin paper asset")?;
+    let (portfolio_id, status): (Uuid, String) = sqlx::query_as(
+        "SELECT portfolio_id, status FROM paper_trading_strategies WHERE id = $1 AND user_id = $2 FOR UPDATE",
+    ).bind(strategy_id).bind(user_id).fetch_optional(&mut *tx).await
+        .context("locking paper strategy for asset")?.ok_or(OrderError::NotFound)?;
+    let existing: Option<portfolios::Asset> = sqlx::query_as(
+        "SELECT * FROM portfolio_assets WHERE portfolio_id = $1 AND provider = $2 AND provider_id = $3",
+    ).bind(portfolio_id).bind(provider).bind(provider_id).fetch_optional(&mut *tx).await
+        .context("finding paper instrument")?;
+    if let Some(asset) = existing {
+        if asset.currency != currency || asset.asset_class != asset_class {
+            return Err(OrderError::Conflict("an existing paper instrument's currency and asset class are immutable".into()));
+        }
+        tx.commit().await.context("commit existing paper asset")?;
+        return Ok(asset);
+    }
+    if status == "ended" {
+        return Err(OrderError::Conflict("cannot add assets to an ended strategy".into()));
+    }
+    let asset = sqlx::query_as(
+        "INSERT INTO portfolio_assets (id, portfolio_id, asset_class, provider, provider_id, symbol, name, currency) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+    ).bind(Uuid::new_v4()).bind(portfolio_id).bind(asset_class).bind(provider)
+        .bind(provider_id).bind(symbol).bind(name).bind(currency)
+        .fetch_one(&mut *tx).await.context("inserting paper instrument")?;
+    tx.commit().await.context("commit paper asset")?;
+    Ok(asset)
+}
+
 pub async fn create_run(
     pool: &PgPool,
     strategy_id: Uuid,
     idempotency_key: &str,
-    scheduled_at: OffsetDateTime,
+    scheduled_at: Option<OffsetDateTime>,
     model: &str,
     market_facts: &Value,
     market_expectations: &Value,
@@ -267,8 +309,35 @@ pub async fn create_run(
     risk_assessment: &Value,
     account_snapshot: &Value,
 ) -> anyhow::Result<PaperRun> {
+    let mut tx = pool.begin().await.context("begin paper run")?;
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM paper_trading_strategies WHERE id = $1 FOR UPDATE",
+    ).bind(strategy_id).fetch_one(&mut *tx).await.context("locking run strategy")?;
+    let existing: Option<PaperRun> = sqlx::query_as(
+        "SELECT * FROM paper_trading_runs WHERE strategy_id = $1 AND idempotency_key = $2",
+    ).bind(strategy_id).bind(idempotency_key).fetch_optional(&mut *tx).await
+        .context("loading idempotent paper run")?;
+    if let Some(existing) = existing {
+        if existing.decision != decision
+            || existing.confidence != confidence
+            || existing.inference != inference
+            || existing.model != model
+            || existing.market_facts != *market_facts
+            || existing.market_expectations != *market_expectations
+            || existing.evidence != *evidence
+            || existing.risk_assessment != *risk_assessment
+            || scheduled_at.is_some_and(|at| at != existing.scheduled_at)
+        {
+            return Err(anyhow!("idempotency key already used for a different paper run"));
+        }
+        tx.commit().await.context("commit existing paper run")?;
+        return Ok(existing);
+    }
+    if status == "ended" {
+        return Err(anyhow!("cannot record new runs for an ended strategy"));
+    }
     let id = Uuid::new_v4();
-    let inserted = sqlx::query_as::<_, PaperRun>(
+    let run = sqlx::query_as::<_, PaperRun>(
         "INSERT INTO paper_trading_runs \
          (id, strategy_id, idempotency_key, scheduled_at, model, market_facts, market_expectations, \
           inference, decision, confidence, evidence, risk_assessment, account_snapshot) \
@@ -280,7 +349,7 @@ pub async fn create_run(
     .bind(id)
     .bind(strategy_id)
     .bind(idempotency_key)
-    .bind(scheduled_at)
+    .bind(scheduled_at.unwrap_or_else(OffsetDateTime::now_utc))
     .bind(model)
     .bind(market_facts)
     .bind(market_expectations)
@@ -290,35 +359,17 @@ pub async fn create_run(
     .bind(evidence)
     .bind(risk_assessment)
     .bind(account_snapshot)
-    .fetch_optional(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("creating paper run")?;
 
-    if let Some(run) = inserted {
-        return Ok(run);
-    }
-    let existing = sqlx::query_as::<_, PaperRun>(
-        "SELECT id, strategy_id, idempotency_key, scheduled_at, model, market_facts, market_expectations, \
-                inference, decision, confidence, evidence, risk_assessment, account_snapshot, created_at \
-         FROM paper_trading_runs WHERE strategy_id = $1 AND idempotency_key = $2",
-    )
-    .bind(strategy_id)
-    .bind(idempotency_key)
-    .fetch_one(pool)
-    .await
-    .context("loading idempotent paper run")?;
-    if existing.decision != decision
-        || existing.confidence != confidence
-        || existing.inference != inference
-        || existing.model != model
-        || existing.market_facts != *market_facts
-        || existing.market_expectations != *market_expectations
-        || existing.evidence != *evidence
-        || existing.risk_assessment != *risk_assessment
-    {
-        return Err(anyhow!("idempotency key already used for a different paper run"));
-    }
-    Ok(existing)
+    tx.commit().await.context("commit paper run")?;
+    Ok(run)
+}
+
+pub async fn get_run_by_key(pool: &PgPool, strategy_id: Uuid, key: &str) -> anyhow::Result<Option<PaperRun>> {
+    Ok(sqlx::query_as("SELECT * FROM paper_trading_runs WHERE strategy_id = $1 AND idempotency_key = $2")
+        .bind(strategy_id).bind(key).fetch_optional(pool).await?)
 }
 
 pub async fn list_runs(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow::Result<Vec<PaperRun>> {
@@ -347,13 +398,17 @@ pub async fn list_orders(pool: &PgPool, strategy_id: Uuid, limit: i64) -> anyhow
 }
 
 pub async fn cash_balance(pool: &PgPool, strategy: &PaperStrategy) -> anyhow::Result<f64> {
+    cash_balance_on(&mut *pool.acquire().await?, strategy).await
+}
+
+async fn cash_balance_on(conn: &mut sqlx::PgConnection, strategy: &PaperStrategy) -> anyhow::Result<f64> {
     let rows: Vec<(String, Date, f64, f64, f64, String)> = sqlx::query_as(
         "SELECT o.side, o.op_date, o.quantity, o.price, o.fee, a.currency \
          FROM portfolio_operations o JOIN portfolio_assets a ON a.id = o.asset_id \
          WHERE o.portfolio_id = $1 ORDER BY o.op_date, o.created_at, o.id",
     )
     .bind(strategy.portfolio_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("loading paper cash flows")?;
 
@@ -366,7 +421,7 @@ pub async fn cash_balance(pool: &PgPool, strategy: &PaperStrategy) -> anyhow::Re
             _ => continue,
         };
         let converted = fx
-            .convert(pool, native_flow, &currency, &strategy.currency, date)
+            .convert_on(conn, native_flow, &currency, &strategy.currency, date)
             .await?
             .ok_or_else(|| anyhow!("missing FX rate for {currency} to {} on {date}", strategy.currency))?;
         cash += converted;
@@ -433,7 +488,7 @@ pub async fn execute_order(
 
     let mut tx = pool.begin().await.context("begin paper order")?;
     let strategy_sql = format!("SELECT {STRATEGY_COLS} FROM paper_trading_strategies WHERE id = $1 AND user_id = $2 FOR UPDATE");
-    let strategy = sqlx::query_as::<_, PaperStrategy>(&strategy_sql)
+    let strategy = sqlx::query_as::<_, PaperStrategy>(sqlx::AssertSqlSafe(strategy_sql))
         .bind(strategy_id)
         .bind(user_id)
         .fetch_optional(&mut *tx)
@@ -445,7 +500,7 @@ pub async fn execute_order(
         if existing.run_id != run_id
             || existing.asset_id != asset_id
             || existing.side != side
-            || (existing.requested_quantity - quantity).abs() > 1e-9
+            || existing.requested_quantity != quantity
         {
             return Err(OrderError::Conflict("idempotency key was already used for a different order".into()));
         }
@@ -474,10 +529,11 @@ pub async fn execute_order(
         return Err(OrderError::Invalid(format!("order side {side} does not match run decision {run_decision}")));
     }
 
-    let asset = portfolios::get_asset(pool, asset_id).await?.ok_or(OrderError::NotFound)?;
-    if asset.portfolio_id != strategy.portfolio_id {
-        return Err(OrderError::NotFound);
-    }
+    // All ledger reads use this transaction's connection. Acquiring pool connections
+    // while holding the strategy lock can exhaust the pool under concurrent orders.
+    let portfolio_assets = portfolios::list_assets_on(&mut tx, strategy.portfolio_id).await?;
+    let asset = portfolio_assets.iter().find(|a| a.id == asset_id)
+        .cloned().ok_or(OrderError::NotFound)?;
     if asset.spot_provider.is_some() {
         return Err(OrderError::Invalid("paper orders require the asset's default shared Market Quote source".into()));
     }
@@ -501,7 +557,8 @@ pub async fn execute_order(
     if today < strategy.start_date {
         return Err(OrderError::Conflict("paper strategy start date is in the future".into()));
     }
-    let quote_native = journal_fx::convert(pool, quote_price_usd, "USD", &asset.currency, today)
+    let mut fx = journal_fx::FxCache::new();
+    let quote_native = fx.convert_on(&mut tx, quote_price_usd, "USD", &asset.currency, today)
         .await?
         .ok_or_else(|| OrderError::Invalid(format!("missing FX rate from USD to {}", asset.currency)))?;
     let slippage = strategy.slippage_bps / 10_000.0;
@@ -519,12 +576,17 @@ pub async fn execute_order(
     };
     let fee_native = commission + sell_levy;
 
-    let notional_account = journal_fx::convert(pool, notional_native, &asset.currency, &strategy.currency, today)
+    let notional_account = fx.convert_on(&mut tx, notional_native, &asset.currency, &strategy.currency, today)
         .await?
         .ok_or_else(|| OrderError::Invalid(format!("missing FX rate from {} to {}", asset.currency, strategy.currency)))?;
-    let fee_account = journal_fx::convert(pool, fee_native, &asset.currency, &strategy.currency, today)
+    let fee_account = fx.convert_on(&mut tx, fee_native, &asset.currency, &strategy.currency, today)
         .await?
         .ok_or_else(|| OrderError::Invalid(format!("missing FX rate from {} to {}", asset.currency, strategy.currency)))?;
+    if !notional_account.is_finite() || notional_account <= 0.0
+        || !fee_account.is_finite() || fee_account < 0.0
+    {
+        return Err(OrderError::Invalid("computed order amounts must be finite and positive".into()));
+    }
     if strategy.max_order_value > 0.0 && notional_account > strategy.max_order_value {
         return Err(OrderError::Conflict(format!(
             "order value {:.2} {} exceeds the configured per-order limit {:.2} {}",
@@ -533,37 +595,46 @@ pub async fn execute_order(
     }
 
     let account_fx_available = strategy.currency == "USD"
-        || journal_fx::convert(pool, 1.0, "USD", &strategy.currency, today).await?.is_some();
+        || fx.convert_on(&mut tx, 1.0, "USD", &strategy.currency, today).await?
+            .is_some_and(|rate| rate.is_finite() && rate > 0.0);
     if !account_fx_available {
         return Err(OrderError::Conflict(format!("missing USD/{} FX rate; cannot enforce account risk limits", strategy.currency)));
     }
-    let cash = cash_balance(pool, &strategy).await?;
-    let portfolio = portfolios::get_portfolio(pool, strategy.portfolio_id)
-        .await?
-        .ok_or_else(|| anyhow!("paper portfolio is missing"))?;
-    let portfolio_assets = portfolios::list_assets(pool, strategy.portfolio_id).await?;
-    let quote_keys: Vec<(String, String)> = portfolio_assets.iter()
-        .filter(|asset| asset.spot_provider.is_none())
-        .map(|asset| (asset.provider.clone(), asset.provider_id.clone()))
-        .collect();
-    let shared_quotes = crate::market_quotes::get_many(pool, &quote_keys).await?;
-    let fresh_quote_keys: HashSet<(String, String)> = shared_quotes.into_iter()
-        .filter(|quote| {
-            let age = (now - quote.quote_at).whole_seconds();
-            (-5..=30).contains(&age)
-        })
-        .map(|quote| (quote.provider, quote.provider_id))
-        .collect();
-    let views = portfolios::asset_views(pool, &portfolio).await?;
+    let cash = cash_balance_on(&mut tx, &strategy).await?;
+    if !cash.is_finite() {
+        return Err(OrderError::Conflict("paper cash is not finite".into()));
+    }
+    let mut views = Vec::new();
+    let mut operations_by_asset = HashMap::new();
+    for holding in portfolio_assets {
+        let operations = portfolios::list_operations_on(&mut tx, holding.id).await?;
+        // The target uses the exact quote used to price the fill. Other holdings
+        // must also have fresh shared quotes; local Portfolio fallback is display-only.
+        let current_quote: Option<(f64, OffsetDateTime)> = if holding.id == asset_id {
+            Some((quote_price_usd, quote_at))
+        } else {
+            sqlx::query_as("SELECT price_usd, quote_at FROM market_quotes WHERE provider = $1 AND provider_id = $2")
+                .bind(&holding.provider).bind(&holding.provider_id)
+                .fetch_optional(&mut *tx).await.context("loading holding quote")?
+        };
+        let fresh_quote = current_quote.filter(|(price, at)| {
+            price.is_finite() && *price > 0.0 && (-5..=30).contains(&(now - *at).whole_seconds())
+                && holding.spot_provider.is_none()
+        });
+        let mut view = portfolios::asset_view_on(&mut tx, holding, &operations, &strategy.currency, today, fresh_quote).await?;
+        if fresh_quote.is_none() {
+            view.market_value = None;
+        }
+        operations_by_asset.insert(view.asset.id, operations);
+        views.push(view);
+    }
     let mut market_value = 0.0_f64;
     let mut market_value_complete = true;
     let mut target_quantity = 0.0_f64;
     let mut target_market_value = 0.0_f64;
     for view in &views {
         if view.quantity > 0.0 {
-            let quote_fresh = view.asset.spot_provider.is_none()
-                && fresh_quote_keys.contains(&(view.asset.provider.clone(), view.asset.provider_id.clone()));
-            match view.market_value.filter(|_| quote_fresh) {
+            match view.market_value.filter(|value| value.is_finite() && *value >= 0.0) {
                 Some(value) => market_value += value,
                 None => market_value_complete = false,
             }
@@ -582,8 +653,7 @@ pub async fn execute_order(
     }
     if side == "sell" {
         let sellable = if asset.provider == "china" && asset.asset_class == "stock" {
-            let operations = portfolios::list_operations(pool, asset_id).await?;
-            china_sellable_quantity(&operations, today)
+            china_sellable_quantity(&operations_by_asset[&asset_id], today)
         } else {
             target_quantity
         };
@@ -622,6 +692,10 @@ pub async fn execute_order(
                 strategy.max_position_pct * 100.0
             )));
         }
+    }
+
+    if side == "sell" && cash + notional_account < fee_account {
+        return Err(OrderError::Conflict("sale proceeds and available cash cannot cover fees".into()));
     }
 
     let operation_id = Uuid::new_v4();
@@ -681,7 +755,7 @@ async fn find_order_by_key_tx(
     key: &str,
 ) -> anyhow::Result<Option<PaperOrderView>> {
     let sql = format!("{ORDER_VIEW_SELECT} WHERE po.strategy_id = $1 AND po.idempotency_key = $2");
-    Ok(sqlx::query_as::<_, PaperOrderView>(&sql)
+    Ok(sqlx::query_as::<_, PaperOrderView>(sqlx::AssertSqlSafe(sql))
         .bind(strategy_id)
         .bind(key)
         .fetch_optional(&mut **tx)
@@ -694,7 +768,7 @@ async fn find_order_by_id_tx(
     order_id: Uuid,
 ) -> anyhow::Result<Option<PaperOrderView>> {
     let sql = format!("{ORDER_VIEW_SELECT} WHERE po.id = $1");
-    Ok(sqlx::query_as::<_, PaperOrderView>(&sql)
+    Ok(sqlx::query_as::<_, PaperOrderView>(sqlx::AssertSqlSafe(sql))
         .bind(order_id)
         .fetch_optional(&mut **tx)
         .await
@@ -733,3 +807,5 @@ mod tests {
         assert!((china_sellable_quantity(&ops, today) - 400.0).abs() < 1e-9);
     }
 }
+
+

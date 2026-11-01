@@ -111,6 +111,7 @@ async fn list(
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateStrategyBody {
     name: String,
     #[serde(default = "default_currency")]
@@ -212,6 +213,7 @@ async fn create(
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateStrategyBody {
     /// active | paused | ended. Ended is terminal.
     status: String,
@@ -272,6 +274,7 @@ async fn search(
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AddAssetBody {
     asset_class: String,
     provider: String,
@@ -316,16 +319,17 @@ async fn add_asset(
     if !CURRENCIES.contains(&currency) {
         return Err(ApiError::bad_request("unsupported asset currency"));
     }
-    let asset = portfolios::add_asset(
+    let asset = store::add_strategy_asset(
         &state.pool,
-        strategy.portfolio_id,
+        user.id,
+        strategy.id,
         body.asset_class.trim(),
         body.provider.trim(),
         body.provider_id.trim(),
         body.symbol.trim(),
         body.name.trim(),
         currency,
-    ).await?;
+    ).await.map_err(order_error)?;
     // The quote gate uses the same provider integration as Watchlist/Portfolio.
     if let Err(error) = market::ensure_identity(&state.pool, &asset.provider, &asset.provider_id).await {
         tracing::warn!("initial paper quote for {} failed: {error:#}", asset.symbol);
@@ -335,6 +339,7 @@ async fn add_asset(
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateRunBody {
     /// Stable key for this scheduled analysis cycle; retries must reuse it.
     idempotency_key: String,
@@ -361,9 +366,6 @@ async fn add_run(
     Json(body): Json<CreateRunBody>,
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
-    if strategy.status == "ended" {
-        return Err(ApiError::conflict("cannot record new runs for an ended strategy"));
-    }
     let key = body.idempotency_key.trim();
     if key.is_empty() || key.len() > 128 {
         return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
@@ -385,11 +387,18 @@ async fn add_run(
         return Err(ApiError::bad_request("confidence must be between 1 and 5"));
     }
     let scheduled_at = match body.scheduled_at.as_deref() {
-        Some(raw) => OffsetDateTime::parse(raw, &Rfc3339)
-            .map_err(|_| ApiError::bad_request("scheduled_at must be RFC3339"))?,
-        None => OffsetDateTime::now_utc(),
+        Some(raw) => Some(OffsetDateTime::parse(raw, &Rfc3339)
+            .map_err(|_| ApiError::bad_request("scheduled_at must be RFC3339"))?),
+        None => None,
     };
-    let (_portfolio, _views, snapshot) = build_context(&state, &strategy).await?;
+    let snapshot = if store::get_run_by_key(&state.pool, id, key).await?.is_some() {
+        Value::Null // A retry preserves the original frozen snapshot even when quotes/FX are unavailable.
+    } else {
+        if strategy.status == "ended" {
+            return Err(ApiError::conflict("cannot record new runs for an ended strategy"));
+        }
+        build_context(&state, &strategy).await?.2
+    };
     let run = store::create_run(
         &state.pool,
         strategy.id,
@@ -405,8 +414,8 @@ async fn add_run(
         &body.risk_assessment,
         &snapshot,
     ).await.map_err(|error| {
-        if error.to_string().contains("idempotency key already used") {
-            ApiError::conflict("idempotency key already used for a different paper run")
+        if error.to_string().contains("idempotency key already used") || error.to_string().contains("ended strategy") {
+            ApiError::conflict(&error.to_string())
         } else {
             tracing::error!("creating paper run failed: {error:#}");
             ApiError::internal("could not create paper run")
@@ -416,6 +425,7 @@ async fn add_run(
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PlaceOrderBody {
     /// Stable key for this simulated order; retries must reuse it.
     idempotency_key: String,
@@ -464,7 +474,12 @@ async fn place_order(
         side,
         body.quantity,
         body.note.trim(),
-    ).await.map_err(|error| match error {
+    ).await.map_err(order_error)?;
+    Ok(Json(json!({ "order": order })))
+}
+
+fn order_error(error: store::OrderError) -> ApiError {
+    match error {
         store::OrderError::NotFound => ApiError::not_found("paper strategy, run or asset not found"),
         store::OrderError::Invalid(message) => ApiError::bad_request(&message),
         store::OrderError::Conflict(message) => ApiError::conflict(&message),
@@ -472,8 +487,7 @@ async fn place_order(
             tracing::error!("paper order execution failed: {error:#}");
             ApiError::internal("paper order execution failed")
         }
-    })?;
-    Ok(Json(json!({ "order": order })))
+    }
 }
 
 #[derive(Deserialize)]
@@ -502,3 +516,5 @@ async fn list_orders(
     let orders = store::list_orders(&state.pool, id, query.limit.unwrap_or(50)).await?;
     Ok(Json(json!({ "orders": orders })))
 }
+
+

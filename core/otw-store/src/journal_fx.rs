@@ -107,7 +107,7 @@ pub async fn mark_pending(pool: &PgPool, date: Date, reason: &str) -> anyhow::Re
 /// The most recent USD→quote rate on or before `date` (carry-forward), falling back to the
 /// oldest stored rate when `date` predates our coverage. `None` only when the quote has no
 /// rate at all.
-async fn usd_rate_on(pool: &PgPool, quote: &str, date: Date) -> anyhow::Result<Option<f64>> {
+async fn usd_rate_on(conn: &mut sqlx::PgConnection, quote: &str, date: Date) -> anyhow::Result<Option<f64>> {
     // Carry-forward: the newest rate on/before the date. Failing that (the date predates our
     // whole history, e.g. a net-worth chart reaching back further than the FX table), carry
     // the oldest rate *backward* instead. Returning None there would silently drop the asset
@@ -119,7 +119,7 @@ async fn usd_rate_on(pool: &PgPool, quote: &str, date: Date) -> anyhow::Result<O
     )
     .bind(quote)
     .bind(date)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("reading fx rate")?;
     if let Some(r) = row {
@@ -131,7 +131,7 @@ async fn usd_rate_on(pool: &PgPool, quote: &str, date: Date) -> anyhow::Result<O
          ORDER BY rate_date ASC LIMIT 1",
     )
     .bind(quote)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("reading earliest fx rate")?;
     Ok(earliest.map(|r| r.0))
@@ -167,14 +167,14 @@ impl FxCache {
 
     async fn usd_rate(
         &mut self,
-        pool: &PgPool,
+        conn: &mut sqlx::PgConnection,
         quote: &str,
         date: Date,
     ) -> anyhow::Result<Option<f64>> {
         if let Some(v) = self.rates.get(&(quote.to_string(), date)) {
             return Ok(*v);
         }
-        let v = usd_rate_on(pool, quote, date).await?;
+        let v = usd_rate_on(conn, quote, date).await?;
         self.rates.insert((quote.to_string(), date), v);
         Ok(v)
     }
@@ -188,13 +188,25 @@ impl FxCache {
         to: &str,
         date: Date,
     ) -> anyhow::Result<Option<f64>> {
+        self.convert_on(&mut *pool.acquire().await?, amount, from, to, date).await
+    }
+
+    /// Same conversion on an existing connection, including an execution transaction.
+    pub(crate) async fn convert_on(
+        &mut self,
+        conn: &mut sqlx::PgConnection,
+        amount: f64,
+        from: &str,
+        to: &str,
+        date: Date,
+    ) -> anyhow::Result<Option<f64>> {
         if from == to {
             return Ok(Some(amount));
         }
         // Rate of 1 unit of `cur` in USD: USD→cur is stored, so 1 cur = 1/rate USD.
         // We instead express everything via USD→cur and cross-divide.
-        let from_rate = if from == "USD" { Some(1.0) } else { self.usd_rate(pool, from, date).await? };
-        let to_rate = if to == "USD" { Some(1.0) } else { self.usd_rate(pool, to, date).await? };
+        let from_rate = if from == "USD" { Some(1.0) } else { self.usd_rate(conn, from, date).await? };
+        let to_rate = if to == "USD" { Some(1.0) } else { self.usd_rate(conn, to, date).await? };
         match (from_rate, to_rate) {
             (Some(fr), Some(tr)) if fr != 0.0 => {
                 // amount in `from`; to USD = amount / fr (since 1 USD = fr from);
@@ -321,3 +333,5 @@ pub async fn rates_asof(pool: &PgPool, date: Date) -> anyhow::Result<Vec<FxRate>
 pub fn yesterday_utc() -> Date {
     (OffsetDateTime::now_utc() - time::Duration::days(1)).date()
 }
+
+
