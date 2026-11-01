@@ -23,7 +23,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/paper-trading/strategies", get(list).post(create))
         .route("/api/paper-trading/search", get(search))
-        .route("/api/paper-trading/strategies/{id}", get(detail))
+        .route("/api/paper-trading/strategies/{id}", get(detail).patch(update_strategy))
         .route("/api/paper-trading/strategies/{id}/context", get(context))
         .route("/api/paper-trading/strategies/{id}/assets", post(add_asset))
         .route("/api/paper-trading/strategies/{id}/runs", get(list_runs).post(add_run))
@@ -174,6 +174,28 @@ async fn create(
         sell_extra_fee_rate_bps: body.sell_extra_fee_rate_bps,
         min_fee: body.min_fee,
     }).await?;
+    Ok(Json(json!({ "strategy": strategy })))
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct UpdateStrategyBody {
+    /// active | paused | ended. Ended is terminal.
+    status: String,
+}
+
+async fn update_strategy(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateStrategyBody>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    if !matches!(body.status.as_str(), "active" | "paused" | "ended") {
+        return Err(ApiError::bad_request("status must be active, paused or ended"));
+    }
+    let strategy = store::set_strategy_status(&state.pool, id, user.id, &body.status)
+        .await?
+        .ok_or_else(|| ApiError::conflict("an ended strategy cannot be reactivated"))?;
     Ok(Json(json!({ "strategy": strategy })))
 }
 
