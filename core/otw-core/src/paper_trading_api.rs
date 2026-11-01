@@ -76,7 +76,7 @@ async fn build_context(
         "market_value_complete": complete,
         "unpriced_holdings": unpriced,
         "holdings": views,
-        "calculated_at": OffsetDateTime::now_utc(),
+        "calculated_at": OffsetDateTime::now_utc().to_string(),
     });
     Ok((portfolio, views, snapshot))
 }
@@ -120,7 +120,7 @@ fn default_ai_provider() -> String { "chatgpt".into() }
 fn default_max_position_pct() -> f64 { 0.50 }
 fn default_slippage_bps() -> f64 { 5.0 }
 fn default_fee_rate_bps() -> f64 { 3.0 }
-fn default_sell_extra_fee_rate_bps() -> f64 { 50.0 }
+fn default_sell_extra_fee_rate_bps() -> f64 { 5.0 }
 fn default_min_fee() -> f64 { 5.0 }
 
 async fn create(
