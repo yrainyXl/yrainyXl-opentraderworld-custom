@@ -77,7 +77,11 @@ async fn ensure(
     let asset = otw_store::portfolios::get_asset(&state.pool, body.portfolio_asset_id)
         .await?
         .ok_or_else(|| ApiError::not_found("portfolio asset not found"))?;
-    // Single-user model: portfolios carry no user column, so every asset
+    // Paper Trading assets are intentionally isolated from personal Research.
+    if otw_store::paper_trading::is_paper_portfolio(&state.pool, asset.portfolio_id).await? {
+        return Err(ApiError::bad_request("paper-trading assets cannot be attached to Investment Cases"));
+    }
+    // Single-user model: normal portfolios carry no user column, so every asset
     // belongs to the current user; case ownership is enforced via user_id.
     let case = investment_cases::ensure_case(&state.pool, user_id, &asset).await?;
     Ok(Json(json!({ "case": case })))
