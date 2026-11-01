@@ -438,6 +438,20 @@ async fn place_order(
     Json(body): Json<PlaceOrderBody>,
 ) -> Result<Json<Value>, ApiError> {
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
+    let side = body.side.trim();
+    let key = body.idempotency_key.trim();
+    if !matches!(side, "buy" | "sell") {
+        return Err(ApiError::bad_request("side must be buy or sell"));
+    }
+    if !body.quantity.is_finite() || body.quantity <= 0.0 {
+        return Err(ApiError::bad_request("quantity must be a positive finite number"));
+    }
+    if key.is_empty() || key.len() > 128 {
+        return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
+    }
+    if body.note.len() > 1000 {
+        return Err(ApiError::bad_request("note is too long (max 1000 characters)"));
+    }
     let assets = portfolios::list_assets(&state.pool, strategy.portfolio_id).await?;
     market::ensure_portfolio_assets(&state.pool, &assets).await?;
     let order = store::execute_order(
@@ -446,8 +460,8 @@ async fn place_order(
         strategy.id,
         body.run_id,
         body.asset_id,
-        body.idempotency_key.trim(),
-        body.side.trim(),
+        key,
+        side,
         body.quantity,
         body.note.trim(),
     ).await.map_err(|error| match error {
