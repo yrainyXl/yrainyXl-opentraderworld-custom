@@ -271,7 +271,7 @@ Paper Trading 是 Portfolio Tracker 上方的策略与执行控制层，不是�
 - `paper_trading_orders` 保存模拟委托意图、幂等键、行情来源时间和对应的 Portfolio operation。
 - **成交价格、数量、手续费、当前持仓、成本与盈亏仍以 Portfolio Tracker 为唯一事实来源**；Paper Trading 不复制一份 position ledger。
 - 可用现金由初始资金加上 Portfolio operations 的现金流派生，按操作日期使用现有 FX 语义换算，不另存可漂移的现金余额。
-- Agent 不得提交成交价格或手续费；服务端从 Shared Market Quote 取价，应用滑点/费用模型，并检查现金、可卖数量、单笔金额和单标的仓位上限。
+- Agent 不得提交成交价格或手续费；服务端从 Shared Market Quote 取价，应用滑点/费用模型，并检查现金、可卖数量、单笔金额和单标的仓位上限；China A-share stocks 遵守 T+1，同日买入数量不可当日卖出。
 - Paper Portfolio 只能通过 Paper Trading API 写入；普通 Portfolio 更新/删除/资产操作/成交/导入路径必须拒绝修改模拟账本。
 - Investment Case 聚合排除 Paper Portfolio，模拟持仓不能污染个人 Research。
 - 该模块永远不连接真实券商或交易所，不产生真实委托。
