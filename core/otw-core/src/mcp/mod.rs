@@ -83,7 +83,7 @@ fn record_auth_failure() {
 ///
 /// Fixed `otw_mcp_` tokens keep the pre-existing behavior: module permissions as stored
 /// and the admin principal for in-process dispatch. OAuth access tokens are bound to a
-/// real OTW user and are always read-only (`mcp:read`), regardless of what the client asks
+/// real OTW user; `mcp:read` is read-only, and `mcp:paper-trade` optionally adds
 /// for.
 pub struct Principal {
     pub name: String,
