@@ -109,6 +109,9 @@ async fn commit(
     Path(id): Path<Uuid>,
     Json(body): Json<CommitBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if otw_store::paper_trading::is_paper_portfolio(&state.pool, id).await? {
+        return Err(ApiError::forbidden("portfolio imports are disabled for Paper Trading accounts"));
+    }
     let bytes = parse::decode_upload(&body.content).map_err(bad_file)?;
     let report = portfolios_import::commit(
         &state.pool,
