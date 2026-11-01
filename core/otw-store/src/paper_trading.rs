@@ -406,16 +406,22 @@ pub async fn execute_order(
     if strategy.status != "active" {
         return Err(OrderError::Conflict("paper strategy is not active".into()));
     }
-    let run_exists: (bool,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM paper_trading_runs WHERE id = $1 AND strategy_id = $2)",
+    let run_decision: Option<String> = sqlx::query_scalar(
+        "SELECT decision FROM paper_trading_runs WHERE id = $1 AND strategy_id = $2",
     )
     .bind(run_id)
     .bind(strategy_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .context("checking paper run")?;
-    if !run_exists.0 {
-        return Err(OrderError::NotFound);
+    let run_decision = run_decision.ok_or(OrderError::NotFound)?;
+    let decision_matches = if side == "buy" {
+        matches!(run_decision.as_str(), "buy" | "add")
+    } else {
+        matches!(run_decision.as_str(), "reduce" | "exit")
+    };
+    if !decision_matches {
+        return Err(OrderError::Invalid(format!("order side {side} does not match run decision {run_decision}")));
     }
 
     let asset = portfolios::get_asset(pool, asset_id).await?.ok_or(OrderError::NotFound)?;
