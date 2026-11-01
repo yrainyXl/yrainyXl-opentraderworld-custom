@@ -427,7 +427,7 @@
   - Research 的跨 Portfolio 持仓聚合排除 paper portfolios；普通 Portfolio API / 导入路径拒绝修改 paper portfolio 的成交账本。
 - **安全执行**：
   - 下单 body 不接受成交价或手续费；服务端读取 Shared Market Quote，校验报价新鲜度，应用策略滑点和费用配置。
-  - 服务端按策略行锁串行化下单；校验 run 与 strategy 归属、决策方向与订单方向、幂等键、可用现金、long-only 可卖数量、单笔金额和单标的仓位上限。
+  - 服务端按策略行锁串行化下单；校验 run 与 strategy 归属、决策方向与订单方向、幂等键、可用现金、long-only 可卖数量、单笔金额和单标的仓位上限；China A-share stocks 额外执行 T+1 可卖数量约束。
   - 订单与 Portfolio operation 在同一数据库事务提交；重复请求返回原订单，复用同一幂等键但提交不同订单内容则拒绝。
   - 默认费用是假设值：佣金 3 bps、最低佣金 5（资产币种）、卖出额外 levy 5 bps、滑点 5 bps；均可在创建策略时调整，不宣称覆盖所有市场真实费率。
 - **OAuth / MCP**：
@@ -445,7 +445,7 @@
   - `CUSTOM_ARCHITECTURE.md`
 - **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表；不改写既有 Portfolio ledger。
 - **API**：
-  - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio。
+  - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
   - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
   - MCP paper-trade scope 可写：添加资产、记录 AI run、提交模拟订单。
 - **验证状态**：当前只在 `feature/paper-trading-agent` 分支提交代码和单元测试；**尚未运行 Rust 编译/测试、尚未应用数据库 migration、尚未部署**。需要通过项目规定的 `scripts/cargo-check.sh` 与目标测试后才可部署。
