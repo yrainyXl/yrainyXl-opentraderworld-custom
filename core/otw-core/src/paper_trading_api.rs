@@ -101,16 +101,21 @@ pub(crate) struct CreateStrategyBody {
     model: String,
     #[serde(default)]
     prompt_version: String,
+    /// Fraction from 0 to 1; 0.5 means a 50% maximum single-asset weight.
     #[serde(default = "default_max_position_pct")]
     max_position_pct: f64,
     /// Omit for 30% of initial cash; set 0 to disable the per-order notional cap.
     max_order_value: Option<f64>,
+    /// Simulated adverse execution adjustment in basis points (5 = 0.05%).
     #[serde(default = "default_slippage_bps")]
     slippage_bps: f64,
+    /// Commission rate in basis points, before the minimum commission.
     #[serde(default = "default_fee_rate_bps")]
     fee_rate_bps: f64,
+    /// Additional sell-side levy in basis points; no minimum is applied to this component.
     #[serde(default = "default_sell_extra_fee_rate_bps")]
     sell_extra_fee_rate_bps: f64,
+    /// Minimum commission in the asset's operation currency.
     #[serde(default = "default_min_fee")]
     min_fee: f64,
 }
@@ -302,7 +307,9 @@ async fn add_asset(
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct CreateRunBody {
+    /// Stable key for this scheduled analysis cycle; retries must reuse it.
     idempotency_key: String,
+    /// Optional RFC3339 scheduled time; omitted means server receipt time.
     scheduled_at: Option<String>,
     #[serde(default)]
     market_facts: Value,
@@ -368,10 +375,15 @@ async fn add_run(
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct PlaceOrderBody {
+    /// Stable key for this simulated order; retries must reuse it.
     idempotency_key: String,
+    /// The recorded AI run that authorized the order direction.
     run_id: Uuid,
+    /// Asset id from this strategy's own paper portfolio.
     asset_id: Uuid,
+    /// buy or sell; no client-supplied price is accepted.
     side: String,
+    /// Requested asset units.
     quantity: f64,
     #[serde(default)]
     note: String,
