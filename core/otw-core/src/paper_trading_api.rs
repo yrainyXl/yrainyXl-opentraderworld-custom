@@ -368,7 +368,8 @@ async fn add_run(
     if key.is_empty() || key.len() > 128 {
         return Err(ApiError::bad_request("idempotency_key must be 1-128 characters"));
     }
-    if !DECISIONS.contains(&body.decision.as_str()) {
+    let decision = body.decision.trim();
+    if !DECISIONS.contains(&decision) {
         return Err(ApiError::bad_request("invalid decision"));
     }
     if !body.market_facts.is_object() || !body.market_expectations.is_object() || !body.risk_assessment.is_object() {
@@ -398,7 +399,7 @@ async fn add_run(
         &body.market_facts,
         &body.market_expectations,
         body.inference.trim(),
-        body.decision.trim(),
+        decision,
         body.confidence,
         &body.evidence,
         &body.risk_assessment,
