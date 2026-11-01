@@ -610,10 +610,11 @@ pub async fn execute_order(
             return Err(OrderError::Conflict("cannot enforce position limits while an existing holding has no current market value".into()));
         }
         let equity = cash + market_value;
-        if equity <= 0.0 {
-            return Err(OrderError::Conflict("paper account equity is not positive".into()));
+        let projected_equity = equity - fee_account;
+        if projected_equity <= 0.0 {
+            return Err(OrderError::Conflict("projected paper account equity is not positive".into()));
         }
-        let projected_weight = (target_market_value + notional_account) / equity;
+        let projected_weight = (target_market_value + notional_account) / projected_equity;
         if projected_weight > strategy.max_position_pct + 1e-9 {
             return Err(OrderError::Conflict(format!(
                 "projected position weight {:.1}% exceeds configured limit {:.1}%",
