@@ -261,6 +261,23 @@ Portfolio 是**交易和持仓事实的唯一来源**。
 
 Portfolio 可以同时用于实盘记录、模拟组合、研究仓，但在 UI 上应清楚标记组合用途。
 
+## 5.3.1 AI Paper Trading —— “AI 在独立账户里如何验证策略？”
+
+Paper Trading 是 Portfolio Tracker 上方的策略与执行控制层，不是第二套持仓账本。
+
+- 一个 Paper Trading strategy 对应一个独立 Portfolio。
+- `paper_trading_strategies` 保存初始资金、策略/模型元数据、费用和风险限制。
+- `paper_trading_runs` 保存每轮 AI 分析、事实/预期/推断、风险判断和服务端冻结的账户快照；无交易也必须留痕。
+- `paper_trading_orders` 保存模拟委托意图、幂等键、行情来源时间和对应的 Portfolio operation。
+- **成交价格、数量、手续费、当前持仓、成本与盈亏仍以 Portfolio Tracker 为唯一事实来源**；Paper Trading 不复制一份 position ledger。
+- 可用现金由初始资金加上 Portfolio operations 的现金流派生，按操作日期使用现有 FX 语义换算，不另存可漂移的现金余额。
+- Agent 不得提交成交价格或手续费；服务端从 Shared Market Quote 取价，应用滑点/费用模型，并检查现金、可卖数量、单笔金额和单标的仓位上限。
+- Paper Portfolio 只能通过 Paper Trading API 写入；普通 Portfolio 更新/删除/资产操作/成交/导入路径必须拒绝修改模拟账本。
+- Investment Case 聚合排除 Paper Portfolio，模拟持仓不能污染个人 Research。
+- 该模块永远不连接真实券商或交易所，不产生真实委托。
+
+Paper Trading 的默认费用参数是可配置的模拟假设，不等同于所有市场的真实费率；每轮订单必须保存报价时间和实际 Portfolio operation 关联，以便审计。
+
 ## 5.4 Investment Case —— “我为什么研究/持有这个标的？”
 
 这是当前 OTW 最缺少、也是后续最值得新增的业务概念。
@@ -549,16 +566,15 @@ OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource S
 - 流程：Authorization Code + 强制 PKCE S256 + consent；DCR 与 host CLI 预注册；
 - Token：不透明 256-bit，数据库只存 SHA-256；access 15 分钟，refresh 30 天轮换，
   重放会撤销整族；
-- 权限：OAuth 只具备 `mcp:read`，MCP 只暴露 `otw_catalog`/`otw_read`；写入、删除、
-  交易、`otw_compute` 一律拒绝；
+- 权限：`mcp:read` 默认只读；可单独请求并经 consent 授权 `mcp:paper-trade`，该 scope 只把 `paper-trading` 模块提升为 `rw`，其他模块仍为 `r`；
+  删除、`otw_compute`、普通 Portfolio 写入和真实券商交易始终拒绝；
 - 用户：OAuth 绑定真实 `users.id`，但当前业务表是单用户模型，因此 authorize 只允许
   admin（owner）；**不得宣称已实现多用户或投资组合隔离**。若未来要支持限定组合，必须
   在业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
 - 外部地址：只通过 `OTW_PUBLIC_BASE_URL` 配置，禁止从 Host / X-Forwarded-* 生成安全 URL。
 - 固定 `otw_mcp_` Token 保留，作为本地 Codex 兼容路径。
 
-后续把 Agent API 扩展为查询持仓/订单或提交模拟交易时，仍必须遵守本节的模块权限与
-确认原则；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
+Paper Trading API 已按上述独立 scope 接入 MCP：Agent 只能在独立模拟组合中记录运行和下达模拟订单；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
 
 不要因为 AI 能访问数据库，就绕过 OTW 原有 API / 权限模型。
 
