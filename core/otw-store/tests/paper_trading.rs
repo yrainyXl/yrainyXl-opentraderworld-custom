@@ -273,7 +273,7 @@ async fn account_cash_uses_operation_date_fx() {
     let p = pool().await;
     let s = strategy(&p, 1000.0, 1.0, 0.0, 0.0).await;
     let today = OffsetDateTime::now_utc().date();
-    journal_fx::upsert_rates(&p, today, &[("CNY".into(), 7.0)], "test").await.unwrap();
+    journal_fx::upsert_rates(&p, today, &[("CNY".into(), 7.0)], "manual").await.unwrap();
     let a = asset(&p, &s, "yahoo", "CNY").await;
     let r = run(&p, &s, "buy", "buy").await;
     let fill = order(&p, &s, &r, &a, "fx", "buy", 10.0).await.unwrap();
