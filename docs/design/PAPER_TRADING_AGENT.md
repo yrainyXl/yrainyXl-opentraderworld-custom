@@ -98,10 +98,10 @@ This keeps cash deterministic from the same Portfolio ledger instead of introduc
 
 ## REST API
 
-Human/session setup endpoints:
+Human/session setup and control endpoints (not in MCP catalog):
 
 - POST /api/paper-trading/strategies
-- POST /api/paper-trading/strategies/{id}/assets
+- PATCH /api/paper-trading/strategies/{id} — active | paused | ended; ended is terminal
 
 Agent-readable endpoints:
 
@@ -158,6 +158,8 @@ Paper positions stay visible in their Portfolio page and Paper Trading context, 
 ## Phase boundary
 
 Phase 1/2 backend covers strategy isolation, account context, run logging, safe paper execution, idempotency and MCP authorization.
+
+Implementation status: the migration, store, REST API, MCP catalog/scope and Research/Portfolio guards have been added on `feature/paper-trading-agent`. Compilation, automated tests and deployment are still pending.
 
 Not included yet:
 
