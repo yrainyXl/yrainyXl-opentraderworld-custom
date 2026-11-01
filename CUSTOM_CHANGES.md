@@ -444,7 +444,7 @@
   - `core/otw-store/src/investment_cases.rs`、`investment_cases_api.rs`
   - `core/otw-core/src/portfolios_api.rs`、`portfolios_import_api.rs`
   - `CUSTOM_ARCHITECTURE.md`
-- **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表；不改写既有 Portfolio ledger。
+- **Migration**：新增 `9000000110_paper_trading.sql`，创建 strategy / run / order 三张表并记录实验 `start_date`；仅扩展现有 OAuth client 的 allowed-scope 列表以允许其请求 `mcp:paper-trade`，不修改任何既有 grant，不改写既有 Portfolio ledger。
 - **API**：
   - Session-only：`POST /api/paper-trading/strategies` 创建策略和对应 Portfolio（可指定历史 `start_date`）；`PATCH /api/paper-trading/strategies/{id}` 暂停/恢复/结束策略（ended 不可恢复）。
   - MCP 可读：策略列表/详情/context、标的搜索、runs、orders。
