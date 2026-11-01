@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{format_description::well_known::{Iso8601, Rfc3339}, Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{market, portfolios::prices, ApiError, AppState};
@@ -69,6 +69,7 @@ async fn build_context(
     let equity = complete.then_some(cash + market_value);
     let snapshot = json!({
         "currency": strategy.currency,
+        "start_date": strategy.start_date,
         "initial_cash": strategy.initial_cash,
         "cash": cash,
         "market_value": market_value,
@@ -94,6 +95,8 @@ pub(crate) struct CreateStrategyBody {
     name: String,
     #[serde(default = "default_currency")]
     currency: String,
+    /// Strategy accounting start date, YYYY-MM-DD. Useful when initializing a paper experiment retrospectively.
+    start_date: Option<String>,
     initial_cash: f64,
     #[serde(default = "default_ai_provider")]
     ai_provider: String,
@@ -144,6 +147,11 @@ async fn create(
     if !body.initial_cash.is_finite() || body.initial_cash <= 0.0 {
         return Err(ApiError::bad_request("initial_cash must be positive"));
     }
+    let start_date = match body.start_date.as_deref() {
+        Some(raw) => Date::parse(raw, &Iso8601::DATE)
+            .map_err(|_| ApiError::bad_request("start_date must be YYYY-MM-DD"))?,
+        None => OffsetDateTime::now_utc().date(),
+    };
     if !body.max_position_pct.is_finite() || body.max_position_pct <= 0.0 || body.max_position_pct > 1.0 {
         return Err(ApiError::bad_request("max_position_pct must be greater than 0 and at most 1"));
     }
@@ -171,6 +179,7 @@ async fn create(
         model: body.model.trim(),
         prompt_version: body.prompt_version.trim(),
         currency: &currency,
+        start_date,
         initial_cash: body.initial_cash,
         max_position_pct: body.max_position_pct,
         max_order_value,
