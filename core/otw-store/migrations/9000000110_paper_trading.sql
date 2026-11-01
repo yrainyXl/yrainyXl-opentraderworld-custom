@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS paper_trading_strategies (
     model                      TEXT NOT NULL DEFAULT '',
     prompt_version             TEXT NOT NULL DEFAULT '',
     currency                   TEXT NOT NULL DEFAULT 'CNY',
+    start_date                 DATE NOT NULL DEFAULT CURRENT_DATE,
     initial_cash               DOUBLE PRECISION NOT NULL CHECK (initial_cash > 0),
     status                     TEXT NOT NULL DEFAULT 'active'
                                CHECK (status IN ('active', 'paused', 'ended')),
