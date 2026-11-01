@@ -169,13 +169,13 @@ fn looks_like_any_token(token: &str) -> bool {
     looks_like_token(token) || otw_store::oauth::looks_like_access_token(token)
 }
 
-/// Read-only module permissions for an OAuth principal: every catalog module at level
-/// `"r"`. The existing permission checks then hide every write/delete endpoint and the
-/// `otw_write`/`otw_compute` tools; the explicit guards below are defense in depth.
-fn read_only_permissions() -> Value {
+/// OAuth permissions default to read-only across OTW. The separate paper-trade scope
+/// upgrades exactly one module; it does not grant writes to Portfolio or any other module.
+fn oauth_permissions(paper_trade: bool) -> Value {
     let mut map = serde_json::Map::new();
     for (module, _) in catalog::MODULES {
-        map.insert((*module).to_string(), Value::String("r".into()));
+        let level = if *module == "paper-trading" && paper_trade { "rw" } else { "r" };
+        map.insert((*module).to_string(), Value::String(level.into()));
     }
     Value::Object(map)
 }
@@ -296,7 +296,7 @@ async fn authenticate_oauth(state: &AppState, token: &str) -> Result<Principal, 
     );
     Ok(Principal {
         name: format!("oauth:{}", row.client_name),
-        permissions: read_only_permissions(),
+        permissions: oauth_permissions(row.has_scope(otw_store::oauth::SCOPE_MCP_PAPER_TRADE)),
         user,
         oauth: true,
     })
@@ -572,7 +572,7 @@ fn tools_list(auth: &Principal) -> Value {
             "annotations": { "readOnlyHint": true, "openWorldHint": false }
         }));
     }
-    if !auth.oauth && any_write(perms) {
+    if any_write(perms) {
         tools.push(json!({
             "name": "otw_write",
             "title": "Write to the API",
@@ -607,15 +607,13 @@ async fn tools_call(
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let perms = &auth.permissions;
 
-    // OAuth grants are read-only for this phase. `tools_list` already hides these tools,
-    // but a hand-crafted call must fail closed too.
-    if auth.oauth && matches!(name, "otw_write" | "otw_compute") {
-        return tool_text(
-            id,
-            "OAuth access is read-only: otw_write and otw_compute are not available on this connection."
-                .to_string(),
-            true,
-        );
+    // OAuth can write only when the separately consented paper-trade scope maps to a
+    // writable paper-trading module. The normal module permissions still gate every path.
+    if auth.oauth && name == "otw_compute" {
+        return tool_text(id, "OAuth connections cannot call otw_compute.".to_string(), true);
+    }
+    if auth.oauth && name == "otw_write" && !any_write(perms) {
+        return tool_text(id, "This OAuth connection is read-only; request mcp:paper-trade to enable isolated paper orders.".to_string(), true);
     }
 
     match name {
