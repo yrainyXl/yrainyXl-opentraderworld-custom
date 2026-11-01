@@ -56,9 +56,11 @@ async fn build_context(
     let cash = store::cash_balance(&state.pool, strategy).await?;
 
     let now = OffsetDateTime::now_utc();
+    let account_fx_available = strategy.currency == "USD"
+        || otw_store::journal_fx::convert(&state.pool, 1.0, "USD", &strategy.currency, now.date()).await?.is_some();
     let mut market_value = 0.0_f64;
-    let mut complete = true;
-    let mut unpriced = Vec::new();
+    let mut complete = account_fx_available;
+    let mut unpriced = if account_fx_available { Vec::new() } else { vec![format!("FX: USD/{} unavailable", strategy.currency)] };
     for view in &views {
         if view.quantity > 0.0 {
             let quote_fresh = view.asset.last_price_at.is_some_and(|at| {
