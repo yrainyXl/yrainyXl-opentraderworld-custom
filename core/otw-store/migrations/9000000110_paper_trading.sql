@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS paper_trading_strategies (
                                CHECK (slippage_bps >= 0 AND slippage_bps <= 1000),
     fee_rate_bps               DOUBLE PRECISION NOT NULL DEFAULT 3
                                CHECK (fee_rate_bps >= 0 AND fee_rate_bps <= 1000),
-    sell_extra_fee_rate_bps    DOUBLE PRECISION NOT NULL DEFAULT 50
+    sell_extra_fee_rate_bps    DOUBLE PRECISION NOT NULL DEFAULT 5
                                CHECK (sell_extra_fee_rate_bps >= 0 AND sell_extra_fee_rate_bps <= 1000),
     min_fee                    DOUBLE PRECISION NOT NULL DEFAULT 5
                                CHECK (min_fee >= 0),
