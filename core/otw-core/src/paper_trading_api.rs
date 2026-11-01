@@ -52,12 +52,17 @@ async fn build_context(
     let views = portfolios::asset_views(&state.pool, &portfolio).await?;
     let cash = store::cash_balance(&state.pool, strategy).await?;
 
+    let now = OffsetDateTime::now_utc();
     let mut market_value = 0.0_f64;
     let mut complete = true;
     let mut unpriced = Vec::new();
     for view in &views {
         if view.quantity > 0.0 {
-            match view.market_value {
+            let quote_fresh = view.asset.last_price_at.is_some_and(|at| {
+                let age = (now - at).whole_seconds();
+                (-5..=30).contains(&age)
+            });
+            match view.market_value.filter(|_| quote_fresh) {
                 Some(value) => market_value += value,
                 None => {
                     complete = false;
@@ -77,7 +82,7 @@ async fn build_context(
         "market_value_complete": complete,
         "unpriced_holdings": unpriced,
         "holdings": views,
-        "calculated_at": OffsetDateTime::now_utc().to_string(),
+        "calculated_at": now.to_string(),
     });
     Ok((portfolio, views, snapshot))
 }
