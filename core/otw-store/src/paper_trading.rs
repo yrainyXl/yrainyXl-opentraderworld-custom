@@ -3,6 +3,8 @@
 //! Strategy metadata and AI audit records live here. All actual fills are written to
 //! Portfolio Tracker's portfolio_operations ledger; no second position ledger exists.
 
+use std::collections::HashSet;
+
 use anyhow::{anyhow, Context};
 use serde::Serialize;
 use serde_json::Value;
@@ -539,6 +541,19 @@ pub async fn execute_order(
     let portfolio = portfolios::get_portfolio(pool, strategy.portfolio_id)
         .await?
         .ok_or_else(|| anyhow!("paper portfolio is missing"))?;
+    let portfolio_assets = portfolios::list_assets(pool, strategy.portfolio_id).await?;
+    let quote_keys: Vec<(String, String)> = portfolio_assets.iter()
+        .filter(|asset| asset.spot_provider.is_none())
+        .map(|asset| (asset.provider.clone(), asset.provider_id.clone()))
+        .collect();
+    let shared_quotes = crate::market_quotes::get_many(pool, &quote_keys).await?;
+    let fresh_quote_keys: HashSet<(String, String)> = shared_quotes.into_iter()
+        .filter(|quote| {
+            let age = (now - quote.quote_at).whole_seconds();
+            (-5..=30).contains(&age)
+        })
+        .map(|quote| (quote.provider, quote.provider_id))
+        .collect();
     let views = portfolios::asset_views(pool, &portfolio).await?;
     let mut market_value = 0.0_f64;
     let mut market_value_complete = true;
@@ -546,10 +561,8 @@ pub async fn execute_order(
     let mut target_market_value = 0.0_f64;
     for view in &views {
         if view.quantity > 0.0 {
-            let quote_fresh = view.asset.last_price_at.is_some_and(|at| {
-                let age = (now - at).whole_seconds();
-                (-5..=30).contains(&age)
-            });
+            let quote_fresh = view.asset.spot_provider.is_none()
+                && fresh_quote_keys.contains(&(view.asset.provider.clone(), view.asset.provider_id.clone()));
             match view.market_value.filter(|_| quote_fresh) {
                 Some(value) => market_value += value,
                 None => market_value_complete = false,
