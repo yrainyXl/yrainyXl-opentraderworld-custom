@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{journal_fx, market_quotes, portfolios::{self, Asset, Portfolio}};
+use crate::{journal_fx, portfolios};
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct PaperStrategy {
@@ -357,6 +357,21 @@ fn fee_for_order(notional: f64, rate_bps: f64, min_fee: f64) -> f64 {
     (notional * rate_bps / 10_000.0).max(min_fee)
 }
 
+/// China A-shares follow T+1: shares bought today are not sellable today. Same-day
+/// sells reduce the quantity available from the position carried into today.
+fn china_sellable_quantity(ops: &[portfolios::Operation], today: Date) -> f64 {
+    let mut sellable = 0.0_f64;
+    for op in ops {
+        if op.op_date < today {
+            if op.side == "buy" { sellable += op.quantity; }
+            if op.side == "sell" { sellable -= op.quantity; }
+        } else if op.op_date == today && op.side == "sell" {
+            sellable -= op.quantity;
+        }
+    }
+    sellable.max(0.0)
+}
+
 pub async fn execute_order(
     pool: &PgPool,
     user_id: Uuid,
@@ -501,11 +516,30 @@ pub async fn execute_order(
         }
     }
 
-    if side == "sell" && quantity > target_quantity + 1e-9 {
-        return Err(OrderError::Conflict(format!(
-            "cannot sell {:.4}; current paper position is {:.4}",
-            quantity, target_quantity
-        )));
+    if side == "buy" && run_decision == "buy" && target_quantity > 1e-9 {
+        return Err(OrderError::Invalid("buy decision requires no existing position; use add".into()));
+    }
+    if side == "buy" && run_decision == "add" && target_quantity <= 1e-9 {
+        return Err(OrderError::Invalid("add decision requires an existing position; use buy".into()));
+    }
+    if side == "sell" {
+        let sellable = if asset.provider == "china" {
+            let operations = portfolios::list_operations(pool, asset_id).await?;
+            china_sellable_quantity(&operations, today)
+        } else {
+            target_quantity
+        };
+        if quantity > sellable + 1e-9 {
+            return Err(OrderError::Conflict(format!(
+                "cannot sell {:.4}; currently sellable paper position is {:.4}", quantity, sellable
+            )));
+        }
+        if run_decision == "reduce" && quantity >= sellable - 1e-9 {
+            return Err(OrderError::Invalid("reduce must leave a remaining sellable position; use exit to close it".into()));
+        }
+        if run_decision == "exit" && (sellable <= 1e-9 || (quantity - sellable).abs() > 1e-9) {
+            return Err(OrderError::Invalid("exit must sell the full currently sellable position".into()));
+        }
     }
     if side == "buy" {
         if cash + 1e-8 < notional_account + fee_account {
@@ -623,5 +657,20 @@ mod tests {
         let commission = fee_for_order(10_000.0, 3.0, 5.0);
         let stamp_duty = 10_000.0 * 5.0 / 10_000.0;
         assert!((commission + stamp_duty - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn china_t_plus_one_excludes_same_day_buys_from_sellable_quantity() {
+        let today = Date::from_calendar_date(2026, time::Month::November, 1).unwrap();
+        let op = |side: &str, date: Date, quantity: f64| portfolios::Operation {
+            id: Uuid::new_v4(), asset_id: Uuid::nil(), side: side.into(), op_date: date,
+            quantity, price: 1.0, fee: 0.0, note: String::new(), created_at: OffsetDateTime::now_utc(),
+        };
+        let ops = vec![
+            op("buy", today.previous_day().unwrap(), 500.0),
+            op("sell", today, 100.0),
+            op("buy", today, 200.0),
+        ];
+        assert!((china_sellable_quantity(&ops, today) - 400.0).abs() < 1e-9);
     }
 }
