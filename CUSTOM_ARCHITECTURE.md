@@ -568,9 +568,8 @@ OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource S
   重放会撤销整族；
 - 权限：`mcp:read` 默认只读；可单独请求并经 consent 授权 `mcp:paper-trade`，该 scope 只把 `paper-trading` 模块提升为 `rw`，其他模块仍为 `r`；
   删除、`otw_compute`、普通 Portfolio 写入和真实券商交易始终拒绝；
-- 用户：OAuth 绑定真实 `users.id`，但当前业务表是单用户模型，因此 authorize 只允许
-  admin（owner）；**不得宣称已实现多用户或投资组合隔离**。若未来要支持限定组合，必须
-  在业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
+- 用户：OAuth 绑定真实 `users.id`，但普通 Portfolio / Watchlist 等业务表仍是单用户模型，因此 authorize 只允许
+  admin（owner）；**不得宣称普通业务数据已实现多用户隔离**。Paper Trading 是受限例外：strategy 绑定 `user_id` 并唯一关联独立 Portfolio，API 每次按当前用户校验 strategy；MCP 的 paper scope 也只写该模块。若未来要支持普通组合级隔离，仍必须给对应业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
 - 外部地址：只通过 `OTW_PUBLIC_BASE_URL` 配置，禁止从 Host / X-Forwarded-* 生成安全 URL。
 - 固定 `otw_mcp_` Token 保留，作为本地 Codex 兼容路径。
 
