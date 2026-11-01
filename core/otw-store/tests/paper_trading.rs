@@ -711,4 +711,3 @@ async fn oauth_paper_permission_remains_opt_in_and_survives_refresh_without_wide
     assert!(!row.has_scope("portfolios:rw"));
     assert_eq!(row.scopes.len(), 2);
 }
-

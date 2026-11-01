@@ -1117,5 +1117,3 @@ mod tests {
         assert_eq!(esc("<script>\"x\"&'"), "&lt;script&gt;&quot;x&quot;&amp;&#39;");
     }
 }
-
-

@@ -61,4 +61,3 @@ jobs:
       - name: Require clean formatting
         if: steps.format.outcome != 'success'
         run: exit 1
-

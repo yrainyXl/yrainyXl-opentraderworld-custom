@@ -1144,4 +1144,3 @@ mod quote_pick_tests {
         assert_eq!(p, 10.0);
     }
 }
-

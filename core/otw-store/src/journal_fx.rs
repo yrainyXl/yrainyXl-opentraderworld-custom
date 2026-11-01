@@ -361,4 +361,3 @@ pub async fn rates_asof(pool: &PgPool, date: Date) -> anyhow::Result<Vec<FxRate>
 pub fn yesterday_utc() -> Date {
     (OffsetDateTime::now_utc() - time::Duration::days(1)).date()
 }
-

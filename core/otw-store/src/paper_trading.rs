@@ -1075,4 +1075,3 @@ mod tests {
         assert!((china_sellable_quantity(&ops, today) - 400.0).abs() < 1e-9);
     }
 }
-
