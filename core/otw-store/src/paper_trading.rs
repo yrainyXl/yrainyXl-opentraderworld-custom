@@ -530,6 +530,11 @@ pub async fn execute_order(
         )));
     }
 
+    let account_fx_available = strategy.currency == "USD"
+        || journal_fx::convert(pool, 1.0, "USD", &strategy.currency, today).await?.is_some();
+    if !account_fx_available {
+        return Err(OrderError::Conflict(format!("missing USD/{} FX rate; cannot enforce account risk limits", strategy.currency)));
+    }
     let cash = cash_balance(pool, &strategy).await?;
     let portfolio = portfolios::get_portfolio(pool, strategy.portfolio_id)
         .await?
