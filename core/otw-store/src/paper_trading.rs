@@ -284,7 +284,6 @@ pub async fn create_run(
         || existing.confidence != confidence
         || existing.inference != inference
         || existing.model != model
-        || existing.scheduled_at != scheduled_at
         || existing.market_facts != *market_facts
         || existing.market_expectations != *market_expectations
         || existing.evidence != *evidence
