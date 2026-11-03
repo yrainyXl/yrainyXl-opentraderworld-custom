@@ -3,6 +3,7 @@
   // agent can then add assets, record runs and place simulated orders inside them. This
   // page only reads the ledger — Portfolio Tracker remains the single source of truth.
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -11,6 +12,7 @@
   import ConfirmModal from '$lib/ui/ConfirmModal.svelte';
   import { t } from '$lib/i18n';
   import StrategyForm from './StrategyForm.svelte';
+  import PaperJson from './PaperJson.svelte';
   import { paperTradingApi, money, qty, pct, when, STATUS_KEY } from './api.js';
 
   let strategies = $state([]);
@@ -138,12 +140,15 @@
   async function openDocument(assetId) {
     if (!selectedId || openingAssetId) return;
     openingAssetId = assetId;
+    error = '';
     try {
       const doc = await paperTradingApi.ensureDocument(selectedId, assetId);
-      // The Editor's query parameter selects this exact page, not the first document.
-      window.location.assign(`/editor?doc=${encodeURIComponent(doc.id)}`);
+      // SPA navigation keeps the back stack; a full reload could restore the pending button
+      // state from the bfcache. `finally` clears it even when navigation is interrupted.
+      await goto(`/editor?doc=${encodeURIComponent(doc.id)}`);
     } catch (e) {
       error = e.message;
+    } finally {
       openingAssetId = null;
     }
   }
@@ -434,13 +439,13 @@
                               </summary>
                               {#if r.inference}<p class="inference">{r.inference}</p>{/if}
                               <p class="muted">{$t('paper.market_facts')}</p>
-                              <pre>{JSON.stringify(r.market_facts ?? {}, null, 2)}</pre>
+                              <PaperJson value={r.market_facts ?? {}} />
                               <p class="muted">{$t('paper.market_expectations')}</p>
-                              <pre>{JSON.stringify(r.market_expectations ?? {}, null, 2)}</pre>
+                              <PaperJson value={r.market_expectations ?? {}} />
                               <p class="muted">{$t('paper.evidence')}</p>
-                              <pre>{JSON.stringify(r.evidence ?? [], null, 2)}</pre>
+                              <PaperJson value={r.evidence ?? []} />
                               <p class="muted">{$t('paper.risk_assessment')}</p>
-                              <pre>{JSON.stringify(r.risk_assessment ?? {}, null, 2)}</pre>
+                              <PaperJson value={r.risk_assessment ?? {}} />
                             </details>
                           {/each}
                         {/if}

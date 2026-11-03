@@ -5027,6 +5027,7 @@
   "paper.quote": "报价",
   "paper.confidence": "置信度",
   "paper.run_time": "时间",
+  "paper.raw_json": "原始数据（调试）",
   "investmentCases.list.lede": "优先查看持仓标的，再跟踪尚未持仓的研究。",
   "investmentCases.list.empty": "暂无研究记录。",
   "investmentCases.list.emptyHint": "可以从 Portfolio 持仓中点击「研究」建立第一条 Investment Case。",

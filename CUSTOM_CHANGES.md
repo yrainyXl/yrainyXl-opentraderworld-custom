@@ -499,6 +499,7 @@
 - **Migration**：`9000000111_paper_strategy_documents.sql` 新建关联表（strategy+asset 主键，document FK `ON DELETE SET NULL`，strategy/asset FK CASCADE）；不修改既有表或账本。
 - **验证**：CI（`.github/workflows/paper-trading.yml`）通过；本地 `scripts/cargo-check.sh` ✓、`npm run build` ✓；部署后 migration 已应用，`paper_strategy_documents` 存在，`GET .../days` 与 `.../documents` 返回 401（路由已接、需登录）。
 - **部署（2026-11-03）**：core 与 frontend 镜像重建并部署；前端一次性容器重新发布 `web-assets`；迁移 `9000000111` 自动应用。现有 2 个策略 / 14 条 run / 1 笔订单未改动。
+- **UI 修复（2026-11-03）**：日视图不再直接输出 `JSON.stringify`；新增 `PaperJson.svelte` 把 run 的 facts / expectations / evidence / risk 渲染为键值列表，原始 JSON 收进「原始数据（调试）」折叠项。Editor 全局策略链接改用 SPA `goto`，并在 `finally` 复位 `openingAssetId`，避免从 Editor 返回后按钮卡在 `…` 和 wait 光标。
 - **回滚**：删除 migration row `9000000111` 并 `DROP TABLE paper_strategy_documents`（只解除 Editor 链接，不删除文档或账本），再还原对应代码重建；无 Portfolio/成交数据迁移。
 
 ## 3. Migration 编号登记
