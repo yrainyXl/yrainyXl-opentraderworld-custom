@@ -5081,5 +5081,18 @@
   "investmentCases.list.holding": "Held {qty}",
   "investmentCases.list.unheld": "Not held",
   "investmentCases.list.open": "View research",
-  "investmentCases.list.noRecords": "No records yet"
+  "investmentCases.list.noRecords": "No records yet",
+  "paper.open_thesis": "View thesis",
+  "paper.create_thesis": "Create thesis",
+  "paper.daily_activity": "Daily trades & returns",
+  "paper.daily_note": "Return is estimated from AI run account snapshots, not official closing P/L. Fills come from the paper ledger.",
+  "paper.days_total": "days with activity",
+  "paper.trades": "Trades",
+  "paper.analyses": "AI runs",
+  "paper.previous": "Previous",
+  "paper.next": "Next",
+  "paper.market_facts": "Verified facts",
+  "paper.market_expectations": "Market expectations",
+  "paper.evidence": "Evidence",
+  "paper.risk_assessment": "Risk assessment"
 }
