@@ -336,7 +336,7 @@
                             title={$t('paper.open_thesis')}
                             onclick={() => openDocument(h.id)}
                           >
-                            {openingAssetId === h.id ? '…' : $t('paper.open_thesis')}
+                            {openingAssetId === h.id ? '…' : documents.some((doc) => doc.asset_id === h.id && doc.document_id) ? $t('paper.open_thesis') : $t('paper.create_thesis')}
                           </button>
                         </td>
                         <td class="num">{qty(h.quantity)}</td>
