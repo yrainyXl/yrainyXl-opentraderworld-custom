@@ -278,6 +278,9 @@ Paper Trading 是 Portfolio Tracker 上方的策略与执行控制层，不是�
 - Investment Case 聚合排除 Paper Portfolio，模拟持仓不能污染个人 Research。
 - 该模块永远不连接真实券商或交易所，不产生真实委托。
 
+- **按日展示只是展示层**：每日 run 的分析和模拟成交依旧分别保存在 `paper_trading_runs` 与 Portfolio operations；页面按北京时间交易日分页，默认只显示成交次数与账户快照估算收益。历史 run 冻结不修改，日终收益不能由盘中/下单前快照冒充。
+- **单只标的全局 AI 策略**：`paper_strategy_documents` 仅保存 strategy+asset 到 Editor 页的关联，不复制持仓、成交事实和 Investment Case 研究。Editor 中按「AI 模拟交易策略 / 策略 / 标的 / 全局交易策略」维护当前买卖条件、证据、证伪与复盘；和用户的个人 Investment Case 保持隔离。AI 在每次分析前读取，只有重要结论变化才提交整页更新，带时间戳乐观锁；重复内容不更新。历史判断仍在不可变 run 中。
+
 Paper Trading 的默认费用参数是可配置的模拟假设，不等同于所有市场的真实费率；每轮订单必须保存报价时间和实际 Portfolio operation 关联，以便审计。
 
 ## 5.4 Investment Case —— “我为什么研究/持有这个标的？”
