@@ -42,7 +42,10 @@
         })
       : '—';
 
-  onMount(loadTree);
+  onMount(() => {
+    // Deep links from AI Paper Trading open the exact strategy document.
+    void loadTree(new URLSearchParams(window.location.search).get('doc'));
+  });
 
   $effect(() => {
     if (!infoOpen) return;
@@ -53,8 +56,12 @@
     return () => window.removeEventListener('mousedown', onDoc);
   });
 
-  async function loadTree() {
+  async function loadTree(requestedId = null) {
     docs = await docsApi.list();
+    if (requestedId && docs.some((doc) => doc.id === requestedId && doc.kind === 'page')) {
+      await selectDoc(requestedId);
+      return;
+    }
     // Auto-open first page if nothing selected.
     if (!selectedId) {
       const firstPage = docs.find((d) => d.kind === 'page');
