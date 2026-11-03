@@ -408,6 +408,12 @@ async fn add_asset(
     let asset = portfolios::get_asset(&state.pool, asset.id)
         .await?
         .unwrap_or(asset);
+    // New paper assets get a scoped Editor thesis page automatically. This
+    // is idempotent and repairable via POST /documents/{asset_id} for older
+    // assets or if document creation failed after the asset committed.
+    if let Err(error) = paper_docs::ensure(&state.pool, strategy.id, asset.id).await {
+        tracing::warn!("paper strategy document setup failed: {error:#}");
+    }
     Ok(Json(json!({ "asset": asset })))
 }
 
