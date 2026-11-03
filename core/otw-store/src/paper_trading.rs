@@ -1085,14 +1085,17 @@ mod tests {
     }
 }
 
-
 // ── Day-level AI audit and paper performance (historical snapshots) ──────────
 // A run snapshot is captured BEFORE any order belonging to that run. Consequently
 // daily equity deltas are only indicative, not official EOD/mark-to-market P&L.
 // Actual fills remain exclusively in portfolio_operations.
 
 pub async fn list_day_summaries(
-    pool: &PgPool, strategy_id: Uuid, initial_cash: f64, limit: i64, offset: i64,
+    pool: &PgPool,
+    strategy_id: Uuid,
+    initial_cash: f64,
+    limit: i64,
+    offset: i64,
 ) -> anyhow::Result<(i64, Vec<Value>)> {
     let dates = "
         FROM (
@@ -1104,7 +1107,9 @@ pub async fn list_day_summaries(
         ) days";
     let count_sql = format!("SELECT COUNT(*) {dates}");
     let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
-        .bind(strategy_id).fetch_one(pool).await?;
+        .bind(strategy_id)
+        .fetch_one(pool)
+        .await?;
     let sql = format!(
         "SELECT days.day,
             (SELECT COUNT(*) FROM paper_trading_runs r WHERE r.strategy_id = $1
@@ -1133,8 +1138,12 @@ pub async fn list_day_summaries(
     );
     let rows: Vec<(Date, i64, i64, Value, Option<f64>, Option<f64>)> =
         sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .bind(strategy_id).bind(limit.clamp(1, 31)).bind(offset.max(0))
-            .fetch_all(pool).await.context("listing paper daily summaries")?;
+            .bind(strategy_id)
+            .bind(limit.clamp(1, 31))
+            .bind(offset.max(0))
+            .fetch_all(pool)
+            .await
+            .context("listing paper daily summaries")?;
     let days = rows.into_iter().map(|(date, run_count, order_count, trades, equity, previous_equity)| {
         // Null means there is no complete valuation snapshot; never fabricate a return.
         serde_json::json!({
@@ -1152,19 +1161,32 @@ pub async fn list_day_summaries(
 }
 
 pub async fn list_runs_for_day(
-    pool: &PgPool, strategy_id: Uuid, day: Date, limit: i64, offset: i64,
+    pool: &PgPool,
+    strategy_id: Uuid,
+    day: Date,
+    limit: i64,
+    offset: i64,
 ) -> anyhow::Result<Vec<PaperRun>> {
     sqlx::query_as(
         "SELECT * FROM paper_trading_runs WHERE strategy_id = $1
          AND (scheduled_at AT TIME ZONE 'Asia/Shanghai')::date = $2
-         ORDER BY scheduled_at DESC, created_at DESC LIMIT $3 OFFSET $4"
+         ORDER BY scheduled_at DESC, created_at DESC LIMIT $3 OFFSET $4",
     )
-    .bind(strategy_id).bind(day).bind(limit.clamp(1, 200)).bind(offset.max(0))
-    .fetch_all(pool).await.context("listing paper runs for day")
+    .bind(strategy_id)
+    .bind(day)
+    .bind(limit.clamp(1, 200))
+    .bind(offset.max(0))
+    .fetch_all(pool)
+    .await
+    .context("listing paper runs for day")
 }
 
 pub async fn list_orders_for_day(
-    pool: &PgPool, strategy_id: Uuid, day: Date, limit: i64, offset: i64,
+    pool: &PgPool,
+    strategy_id: Uuid,
+    day: Date,
+    limit: i64,
+    offset: i64,
 ) -> anyhow::Result<Vec<PaperOrderView>> {
     let sql = format!(
         "{ORDER_VIEW_SELECT} WHERE po.strategy_id = $1
@@ -1172,6 +1194,11 @@ pub async fn list_orders_for_day(
          ORDER BY po.created_at DESC LIMIT $3 OFFSET $4"
     );
     sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(strategy_id).bind(day).bind(limit.clamp(1, 200)).bind(offset.max(0))
-        .fetch_all(pool).await.context("listing paper orders for day")
+        .bind(strategy_id)
+        .bind(day)
+        .bind(limit.clamp(1, 200))
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await
+        .context("listing paper orders for day")
 }
