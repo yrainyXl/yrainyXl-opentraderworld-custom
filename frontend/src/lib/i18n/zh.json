@@ -5088,11 +5088,12 @@
   "paper.daily_note": "收益为 AI 分析时记录的账户快照差额估算，不等于正式收盘结算；交易数据来自模拟账本。",
   "paper.days_total": "个交易记录日",
   "paper.trades": "成交",
-  "paper.analyses": "次分析",
+  "paper.analyses": "AI 分析详情",
   "paper.previous": "上一页",
   "paper.next": "下一页",
   "paper.market_facts": "已确认事实",
   "paper.market_expectations": "市场预期",
   "paper.evidence": "证据",
-  "paper.risk_assessment": "风险评估"
+  "paper.risk_assessment": "风险评估",
+  "paper.analysis_times": "次分析"
 }
