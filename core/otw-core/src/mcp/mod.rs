@@ -83,8 +83,8 @@ fn record_auth_failure() {
 ///
 /// Fixed `otw_mcp_` tokens keep the pre-existing behavior: module permissions as stored
 /// and the admin principal for in-process dispatch. OAuth access tokens are bound to a
-/// real OTW user and are always read-only (`mcp:read`), regardless of what the client asks
-/// for.
+/// real OTW user; `mcp:read` grants read access to every module, while
+/// `mcp:paper-trade` optionally adds write access to the isolated paper-trading module.
 pub struct Principal {
     pub name: String,
     pub permissions: Value,
@@ -169,21 +169,36 @@ fn looks_like_any_token(token: &str) -> bool {
     looks_like_token(token) || otw_store::oauth::looks_like_access_token(token)
 }
 
-/// Read-only module permissions for an OAuth principal: every catalog module at level
-/// `"r"`. The existing permission checks then hide every write/delete endpoint and the
-/// `otw_write`/`otw_compute` tools; the explicit guards below are defense in depth.
-fn read_only_permissions() -> Value {
+/// OAuth permissions default to read-only across OTW. The separate paper-trade scope
+/// upgrades exactly one module; it does not grant writes to Portfolio or any other module.
+fn oauth_permissions(paper_trade: bool) -> Value {
     let mut map = serde_json::Map::new();
     for (module, _) in catalog::MODULES {
-        map.insert((*module).to_string(), Value::String("r".into()));
+        let level = if *module == "paper-trading" && paper_trade { "rw" } else { "r" };
+        map.insert((*module).to_string(), Value::String(level.into()));
     }
     Value::Object(map)
 }
 
+/// Scope list advertised in the 401 challenge. MCP clients (ChatGPT included) request
+/// exactly this list, so it must name every scope the connection may need: read, the
+/// optional paper-trading write scope when enabled, and `offline_access` (refresh tokens).
+/// ChatGPT does not reliably add `offline_access` on its own; leaving it out produces
+/// two-scope connections on some registrations.
+fn challenge_scope(advertise_paper_trade: bool) -> String {
+    let mut scopes = vec![otw_store::oauth::SCOPE_MCP_READ];
+    if advertise_paper_trade {
+        scopes.push(otw_store::oauth::SCOPE_MCP_PAPER_TRADE);
+    }
+    scopes.push(otw_store::oauth::SCOPE_OFFLINE_ACCESS);
+    scopes.join(" ")
+}
+
 fn challenge_header(state: &AppState, challenge: Challenge) -> Option<HeaderValue> {
     let base = state.public_base_url.as_deref()?;
+    let scope = challenge_scope(state.mcp_advertise_paper_trade);
     let mut value = format!(
-        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\", scope=\"mcp:read\""
+        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\", scope=\"{scope}\""
     );
     match challenge {
         Challenge::None => {}
@@ -296,7 +311,7 @@ async fn authenticate_oauth(state: &AppState, token: &str) -> Result<Principal, 
     );
     Ok(Principal {
         name: format!("oauth:{}", row.client_name),
-        permissions: read_only_permissions(),
+        permissions: oauth_permissions(row.has_scope(otw_store::oauth::SCOPE_MCP_PAPER_TRADE)),
         user,
         oauth: true,
     })
@@ -572,7 +587,7 @@ fn tools_list(auth: &Principal) -> Value {
             "annotations": { "readOnlyHint": true, "openWorldHint": false }
         }));
     }
-    if !auth.oauth && any_write(perms) {
+    if any_write(perms) {
         tools.push(json!({
             "name": "otw_write",
             "title": "Write to the API",
@@ -607,15 +622,13 @@ async fn tools_call(
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let perms = &auth.permissions;
 
-    // OAuth grants are read-only for this phase. `tools_list` already hides these tools,
-    // but a hand-crafted call must fail closed too.
-    if auth.oauth && matches!(name, "otw_write" | "otw_compute") {
-        return tool_text(
-            id,
-            "OAuth access is read-only: otw_write and otw_compute are not available on this connection."
-                .to_string(),
-            true,
-        );
+    // OAuth can write only when the separately consented paper-trade scope maps to a
+    // writable paper-trading module. The normal module permissions still gate every path.
+    if auth.oauth && name == "otw_compute" {
+        return tool_text(id, "OAuth connections cannot call otw_compute.".to_string(), true);
+    }
+    if auth.oauth && name == "otw_write" && !any_write(perms) {
+        return tool_text(id, "This OAuth connection is read-only; request mcp:paper-trade to enable isolated paper orders.".to_string(), true);
     }
 
     match name {
@@ -1165,6 +1178,81 @@ mod tests {
     }
 
     #[test]
+    fn challenge_lists_offline_and_optional_paper_scope() {
+        assert_eq!(
+            challenge_scope(false),
+            format!(
+                "{} {}",
+                otw_store::oauth::SCOPE_MCP_READ,
+                otw_store::oauth::SCOPE_OFFLINE_ACCESS
+            )
+        );
+        assert_eq!(
+            challenge_scope(true),
+            format!(
+                "{} {} {}",
+                otw_store::oauth::SCOPE_MCP_READ,
+                otw_store::oauth::SCOPE_MCP_PAPER_TRADE,
+                otw_store::oauth::SCOPE_OFFLINE_ACCESS
+            )
+        );
+    }
+
+    #[test]
+    fn oauth_paper_scope_writes_only_to_paper_trading() {
+        let read_only = oauth_permissions(false);
+        assert!(can_read(&read_only, "paper-trading"));
+        assert!(!can_write(&read_only, "paper-trading"));
+        assert!(!can_write(&read_only, "portfolios"));
+
+        let paper = oauth_permissions(true);
+        assert!(can_read(&paper, "portfolios"));
+        assert!(!can_write(&paper, "portfolios"));
+        assert!(can_write(&paper, "paper-trading"));
+        assert!(!can_delete(&paper, "paper-trading"));
+        assert!(!any_compute(&paper));
+
+        let mut principal = principal(paper);
+        principal.oauth = true;
+        let names: Vec<String> = tools_list(&principal)["tools"]
+            .as_array().unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.iter().any(|name| name == "otw_write"));
+        assert!(!names.iter().any(|name| name == "otw_compute"));
+    }
+
+    #[test]
+    fn paper_scope_never_grants_generic_module_writes_or_deletes() {
+        let permissions = oauth_permissions(true);
+        for (module, _) in catalog::MODULES {
+            assert_eq!(can_write(&permissions, module), *module == "paper-trading");
+            assert!(!can_delete(&permissions, module));
+        }
+        let read_principal = Principal { oauth: true, ..principal(oauth_permissions(false)) };
+        assert!(!tools_list(&read_principal)["tools"].as_array().unwrap().iter()
+            .any(|tool| tool["name"] == "otw_write"));
+    }
+
+    #[test]
+    fn paper_setup_and_control_are_never_mcp_allowlisted() {
+        let root = "/api/paper-trading/strategies";
+        let strategy = "/api/paper-trading/strategies/00000000-0000-0000-0000-000000000001";
+        assert!(catalog::lookup("GET", root).is_some());
+        assert!(catalog::lookup("POST", root).is_none());
+        assert!(catalog::lookup("PATCH", strategy).is_none());
+        assert!(catalog::lookup("DELETE", strategy).is_none());
+        for suffix in ["runs", "orders", "assets"] {
+            let path = format!("{strategy}/{suffix}");
+            let endpoint = catalog::lookup("POST", &path).expect("allowlisted constrained paper write");
+            assert_eq!(endpoint.module, "paper-trading");
+            assert!(!endpoint.compute);
+            assert!(catalog::lookup("DELETE", &path).is_none());
+        }
+    }
+
+    #[test]
     fn bare_catalog_is_a_compact_index_without_endpoint_paths() {
         let perms = json!({ "journal": "r", "backtest": "rw" });
         let out = render_catalog(&perms, None);
@@ -1401,3 +1489,5 @@ mod tests {
         assert!(fenced.contains("ignore your instructions"));
     }
 }
+
+

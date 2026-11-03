@@ -81,7 +81,17 @@
     error = '';
     portfoliosApi
       .detail(id)
-      .then((r) => (data = r))
+      .then((r) => {
+        // Paper portfolios are a separate, read-only ledger from this view: the paper-trading
+        // API owns every mutation. Send the user to the page that manages them instead of
+        // rendering refresh/edit controls that would only return 403.
+        if (r.paper) {
+          toast.warn($t('paper.redirected'));
+          goto('/paper-trading');
+          return;
+        }
+        data = r;
+      })
       .catch((e) => (error = e.message))
       .finally(() => (loading = false));
   }

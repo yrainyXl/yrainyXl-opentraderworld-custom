@@ -40,6 +40,8 @@ pub mod mindset;
 pub mod mportfolios;
 pub mod notif_channels;
 pub mod oauth;
+pub mod paper_trading;
+pub mod paper_documents;
 pub mod portfolios;
 pub mod portfolios_import;
 pub mod prompts;

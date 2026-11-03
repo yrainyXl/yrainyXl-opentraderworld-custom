@@ -22,6 +22,20 @@ use crate::{ApiError, AppState};
 use otw_store::journal::CURRENCIES;
 use otw_store::portfolios as store;
 
+async fn ensure_not_paper_portfolio(pool: &sqlx::PgPool, portfolio_id: Uuid) -> Result<(), ApiError> {
+    if otw_store::paper_trading::is_paper_portfolio(pool, portfolio_id).await? {
+        return Err(ApiError::forbidden("this portfolio is managed by Paper Trading; use the paper-trading API"));
+    }
+    Ok(())
+}
+
+async fn ensure_not_paper_asset(pool: &sqlx::PgPool, asset_id: Uuid) -> Result<(), ApiError> {
+    if otw_store::paper_trading::is_paper_asset(pool, asset_id).await? {
+        return Err(ApiError::forbidden("this asset belongs to a Paper Trading account; use the paper-trading API"));
+    }
+    Ok(())
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/portfolios", get(list).post(create))
@@ -50,8 +64,17 @@ fn parse_date(s: Option<&str>) -> Result<Date, ApiError> {
 
 async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let portfolios = store::list_portfolios(&state.pool).await?;
+    // Paper portfolios are owned by a Paper Trading strategy and are read-only here: every
+    // normal Portfolio mutation is rejected by `ensure_not_paper_portfolio`. Keep them out of
+    // the Portfolio Tracker list so the UI never offers refresh/edit/delete on a ledger that
+    // belongs to the paper-trading API (the AI Paper Trading page shows them instead).
+    let paper: std::collections::HashSet<Uuid> =
+        otw_store::paper_trading::paper_portfolio_ids(&state.pool).await?.into_iter().collect();
     let mut out = Vec::with_capacity(portfolios.len());
     for pf in &portfolios {
+        if paper.contains(&pf.id) {
+            continue;
+        }
         // Entry freshness: value every card against the shared current Market Quote,
         // refreshing stale instruments before the P&L is computed — never "as of the last
         // Portfolio refresh" alone.
@@ -93,6 +116,9 @@ async fn detail(
     let pf = store::get_portfolio(&state.pool, id)
         .await?
         .ok_or_else(|| ApiError::not_found("portfolio not found"))?;
+    // A direct URL to a paper portfolio must not render the normal mutation controls. The
+    // SPA redirects to /paper-trading when this flag is set.
+    let paper = otw_store::paper_trading::is_paper_portfolio(&state.pool, id).await?;
     // Entry freshness: refresh stale shared Market Quotes for this portfolio's instruments
     // before computing the assets/summary, so the page never re-shows an old price just
     // because the Portfolio side hasn't refreshed on its own yet.
@@ -111,7 +137,8 @@ async fn detail(
         "summary": summary,
         "assets": assets,
         "operations": operations,
-        "snapshots": snapshots
+        "snapshots": snapshots,
+        "paper": paper
     })))
 }
 
@@ -130,6 +157,7 @@ async fn update(
     Path(id): Path<Uuid>,
     Json(b): Json<UpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
+    ensure_not_paper_portfolio(&state.pool, id).await?;
     let pf = store::update_portfolio(
         &state.pool,
         id,
@@ -145,6 +173,7 @@ async fn update(
 }
 
 async fn remove(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
+    ensure_not_paper_portfolio(&state.pool, id).await?;
     store::delete_portfolio(&state.pool, id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -234,6 +263,7 @@ async fn add_asset(
     Path(id): Path<Uuid>,
     Json(b): Json<AddAssetBody>,
 ) -> Result<Json<Value>, ApiError> {
+    ensure_not_paper_portfolio(&state.pool, id).await?;
     if !matches!(b.provider.as_str(), "coingecko" | "yahoo" | "china") {
         return Err(ApiError::bad_request("unknown provider"));
     }
@@ -295,6 +325,7 @@ async fn delete_asset(
     State(state): State<AppState>,
     Path(asset_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    ensure_not_paper_asset(&state.pool, asset_id).await?;
     store::delete_asset(&state.pool, asset_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -326,6 +357,7 @@ async fn patch_asset(
     Path(asset_id): Path<Uuid>,
     Json(b): Json<PatchAssetBody>,
 ) -> Result<Json<Value>, ApiError> {
+    ensure_not_paper_asset(&state.pool, asset_id).await?;
     if let Some(Some(p)) = &b.spot_provider {
         if !matches!(p.as_str(), "coingecko" | "yahoo" | "china" | "binance" | "kraken" | "coinbase") {
             return Err(ApiError::bad_request("unknown spot_provider"));
@@ -377,6 +409,7 @@ async fn add_operation(
     let asset = store::get_asset(&state.pool, asset_id)
         .await?
         .ok_or_else(|| ApiError::not_found("asset not found"))?;
+    ensure_not_paper_portfolio(&state.pool, asset.portfolio_id).await?;
     // An asset added after the last portfolio refresh has no spot yet, so its row would show a
     // position with blank price/value until the next one. Booking an operation is the moment the
     // user expects a live price, so fill it in here when it's still missing. Best-effort.
@@ -404,6 +437,9 @@ async fn delete_operation(
     State(state): State<AppState>,
     Path(op_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    if otw_store::paper_trading::is_paper_operation(&state.pool, op_id).await? {
+        return Err(ApiError::forbidden("paper fills are immutable; use the Paper Trading audit trail"));
+    }
     store::delete_operation(&state.pool, op_id).await?;
     Ok(Json(json!({ "ok": true })))
 }

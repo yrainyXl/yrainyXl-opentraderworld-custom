@@ -261,6 +261,28 @@ Portfolio 是**交易和持仓事实的唯一来源**。
 
 Portfolio 可以同时用于实盘记录、模拟组合、研究仓，但在 UI 上应清楚标记组合用途。
 
+## 5.3.1 AI Paper Trading —— “AI 在独立账户里如何验证策略？”
+
+Paper Trading 是 Portfolio Tracker 上方的策略与执行控制层，不是第二套持仓账本。
+
+- 一个 Paper Trading strategy 对应一个独立 Portfolio。
+- `paper_trading_strategies` 保存初始资金、策略/模型元数据、费用和风险限制。
+- `paper_trading_runs` 保存每轮 AI 分析、事实/预期/推断、风险判断和服务端冻结的账户快照；无交易也必须留痕。
+- `paper_trading_orders` 保存模拟委托意图、幂等键、行情来源时间和对应的 Portfolio operation。
+- **成交价格、数量、手续费、当前持仓、成本与盈亏仍以 Portfolio Tracker 为唯一事实来源**；Paper Trading 不复制一份 position ledger。
+- 可用现金由初始资金加上 Portfolio operations 的现金流派生，按操作日期使用现有 FX 语义换算，不另存可漂移的现金余额。
+- Agent 不得提交成交价格或手续费；服务端从 Shared Market Quote 取价，应用滑点/费用模型，并检查现金、可卖数量、单笔金额和单标的仓位上限；China A-share stocks 遵守 T+1，同日买入数量不可当日卖出。
+- Paper Portfolio 只能通过 Paper Trading API 写入；普通 Portfolio 更新/删除/资产操作/成交/导入路径必须拒绝修改模拟账本。
+- 模拟资产的计价币种和资产类别在创建后不可变，重复添加标的不得重新解释历史成交金额。策略状态、资产添加、run 与订单写入共用策略行锁；订单内所有账本/FX 读取复用同一事务连接，不能在持锁时再申请连接池连接。
+- China 模拟成交使用 Asia/Shanghai 业务日期。当前所有 China 标的保守执行 T+1，直到 Market 层能提供权威结算类型；Agent 自填的 asset_class 不得用于绕过结算约束。
+- Investment Case 聚合排除 Paper Portfolio，模拟持仓不能污染个人 Research。
+- 该模块永远不连接真实券商或交易所，不产生真实委托。
+
+- **按日展示只是展示层**：每日 run 的分析和模拟成交依旧分别保存在 `paper_trading_runs` 与 Portfolio operations；页面按北京时间交易日分页，默认只显示成交次数与账户快照估算收益。历史 run 冻结不修改，日终收益不能由盘中/下单前快照冒充。
+- **单只标的全局 AI 策略**：`paper_strategy_documents` 仅保存 strategy+asset 到 Editor 页的关联，不复制持仓、成交事实和 Investment Case 研究。Editor 中按「AI 模拟交易策略 / 策略 / 标的 / 全局交易策略」维护当前买卖条件、证据、证伪与复盘；和用户的个人 Investment Case 保持隔离。AI 在每次分析前读取，只有重要结论变化才提交整页更新，带时间戳乐观锁；重复内容不更新。历史判断仍在不可变 run 中。
+
+Paper Trading 的默认费用参数是可配置的模拟假设，不等同于所有市场的真实费率；每轮订单必须保存报价时间和实际 Portfolio operation 关联，以便审计。
+
 ## 5.4 Investment Case —— “我为什么研究/持有这个标的？”
 
 这是当前 OTW 最缺少、也是后续最值得新增的业务概念。
@@ -549,16 +571,17 @@ OTW 在 `otw-core` 内同时提供 OAuth Authorization Server 与 MCP Resource S
 - 流程：Authorization Code + 强制 PKCE S256 + consent；DCR 与 host CLI 预注册；
 - Token：不透明 256-bit，数据库只存 SHA-256；access 15 分钟，refresh 30 天轮换，
   重放会撤销整族；
-- 权限：OAuth 只具备 `mcp:read`，MCP 只暴露 `otw_catalog`/`otw_read`；写入、删除、
-  交易、`otw_compute` 一律拒绝；
-- 用户：OAuth 绑定真实 `users.id`，但当前业务表是单用户模型，因此 authorize 只允许
-  admin（owner）；**不得宣称已实现多用户或投资组合隔离**。若未来要支持限定组合，必须
-  在业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
+- 权限：`mcp:read` 默认只读；可单独请求并经 consent 授权 `mcp:paper-trade`，该 scope 只把 `paper-trading` 模块提升为 `rw`，其他模块仍为 `r`；
+  删除、`otw_compute`、普通 Portfolio 写入和真实券商交易始终拒绝；
+- 用户：OAuth 绑定真实 `users.id`，但普通 Portfolio / Watchlist 等业务表仍是单用户模型，因此 authorize 只允许
+  admin（owner）；**不得宣称普通业务数据已实现多用户隔离**。Paper Trading 是受限例外：strategy 绑定 `user_id` 并唯一关联独立 Portfolio，API 每次按当前用户校验 strategy；MCP 的 paper scope 也只写该模块。若未来要支持普通组合级隔离，仍必须给对应业务表增加 ownership，并覆盖列表、详情、子资源与聚合查询。
 - 外部地址：只通过 `OTW_PUBLIC_BASE_URL` 配置，禁止从 Host / X-Forwarded-* 生成安全 URL。
+- 权限协商：MCP 客户端（含 ChatGPT）只按 `/api/mcp` 401 `WWW-Authenticate` 的 `scope` 发起授权，不读取 discovery 的 `scopes_supported`。因此 challenge 必须列全连接需要的 scope：`mcp:read` 与 `offline_access` 恒定列出，`mcp:paper-trade` 由 `OTW_MCP_ADVERTISE_PAPER_TRADE=true` 显式加入；默认 `false` 时不广告 paper。ChatGPT 不会稳定地自行补 `offline_access`，漏写会导致某些授权只拿到两个 scope。广告 scope 不等于授权，最终仍以 consent 页与 Token scope 为准。
 - 固定 `otw_mcp_` Token 保留，作为本地 Codex 兼容路径。
 
-后续把 Agent API 扩展为查询持仓/订单或提交模拟交易时，仍必须遵守本节的模块权限与
-确认原则；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
+Paper Trading API 已按上述独立 scope 接入 MCP：Agent 只能在独立模拟组合中记录运行和下达模拟订单；Token 的 scope 是唯一授权来源，禁止从请求参数推断用户身份。
+
+前端 `/paper-trading` 模块只提供 session-only 的策略创建、状态控制与账本查看；AI 写入仍只能走 MCP，页面不提供下单入口。普通 Portfolio Tracker 列表不展示 paper portfolio，直接访问其详情会跳转 `/paper-trading`；paper 账本只在 AI Paper Trading 页只读展示，避免误用普通 Portfolio API 触发 403。
 
 不要因为 AI 能访问数据库，就绕过 OTW 原有 API / 权限模型。
 

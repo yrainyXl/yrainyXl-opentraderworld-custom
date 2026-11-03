@@ -65,6 +65,7 @@ mod notif_send;
 mod oauth;
 mod portfolios;
 mod portfolios_api;
+mod paper_trading_api;
 mod portfolios_import;
 mod portfolios_import_api;
 mod prompts_api;
@@ -182,6 +183,12 @@ pub struct AppState {
     /// `OTW_PUBLIC_BASE_URL`; `None` disables the OAuth authorization server. Never derived
     /// from Host/X-Forwarded-* headers.
     pub public_base_url: Option<String>,
+    /// Advertise `mcp:paper-trade` in the `/api/mcp` 401 `WWW-Authenticate` challenge. MCP
+    /// clients (notably ChatGPT) request exactly the scopes advertised there, so without
+    /// this they never ask for the optional paper-trading write scope. Consent still decides
+    /// whether it is granted. Set from `OTW_MCP_ADVERTISE_PAPER_TRADE`; default false keeps
+    /// every OAuth client read-only until the operator opts in.
+    pub mcp_advertise_paper_trade: bool,
 }
 
 #[tokio::main]
@@ -371,6 +378,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Optional write scope for paper trading. It is only advertised when the operator opts
+    // in, because MCP clients request exactly what the 401 challenge lists. Consent still
+    // gates the grant — advertising a scope never grants it.
+    let mcp_advertise_paper_trade = std::env::var("OTW_MCP_ADVERTISE_PAPER_TRADE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
     let state = AppState {
         pool,
         upload_dir,
@@ -384,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         submit_limiter: community_docs_api::SubmitLimiter::new(),
         optimizer: std::sync::Arc::new(backtest::optimize::Jobs::new()),
         public_base_url,
+        mcp_advertise_paper_trade,
     };
 
     // Public routes: health and the auth handshake (setup + login). Everything else is
@@ -446,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(quant_api::routes())
         .merge(mportfolios_api::routes())
         .merge(portfolios_api::routes())
+        .merge(paper_trading_api::routes())
         .merge(portfolios_import_api::routes())
         .merge(watchlists_api::routes())
         .merge(rate_api::routes())

@@ -146,7 +146,10 @@ mod date_fmt {
     use serde::Serializer;
     use time::{format_description::well_known::Iso8601, Date};
     pub fn serialize<S: Serializer>(d: &Date, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&d.format(&Iso8601::DATE).map_err(serde::ser::Error::custom)?)
+        s.serialize_str(
+            &d.format(&Iso8601::DATE)
+                .map_err(serde::ser::Error::custom)?,
+        )
     }
 }
 
@@ -247,10 +250,19 @@ pub async fn list_auto_refresh(pool: &PgPool) -> anyhow::Result<Vec<Portfolio>> 
 // ── Assets ────────────────────────────────────────────────────────────────────
 
 pub async fn list_assets(pool: &PgPool, portfolio_id: Uuid) -> anyhow::Result<Vec<Asset>> {
-    let sql = format!("SELECT {ASSET_COLS} FROM portfolio_assets WHERE portfolio_id = $1 ORDER BY symbol");
+    list_assets_on(&mut *pool.acquire().await?, portfolio_id).await
+}
+
+pub(crate) async fn list_assets_on(
+    conn: &mut sqlx::PgConnection,
+    portfolio_id: Uuid,
+) -> anyhow::Result<Vec<Asset>> {
+    let sql = format!(
+        "SELECT {ASSET_COLS} FROM portfolio_assets WHERE portfolio_id = $1 ORDER BY symbol"
+    );
     Ok(sqlx::query_as::<_, Asset>(sqlx::AssertSqlSafe(sql))
         .bind(portfolio_id)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .context("listing assets")?)
 }
@@ -306,12 +318,14 @@ pub async fn delete_asset(pool: &PgPool, id: Uuid) -> anyhow::Result<()> {
 
 /// Store a freshly fetched USD spot for an asset.
 pub async fn set_asset_price(pool: &PgPool, id: Uuid, price_usd: f64) -> anyhow::Result<()> {
-    sqlx::query("UPDATE portfolio_assets SET last_price_usd = $2, last_price_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(price_usd)
-        .execute(pool)
-        .await
-        .context("setting asset price")?;
+    sqlx::query(
+        "UPDATE portfolio_assets SET last_price_usd = $2, last_price_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(price_usd)
+    .execute(pool)
+    .await
+    .context("setting asset price")?;
     Ok(())
 }
 
@@ -347,12 +361,7 @@ pub async fn update_asset(
 }
 
 /// Record the outcome of a reconcile check for an asset.
-pub async fn set_recon(
-    pool: &PgPool,
-    id: Uuid,
-    status: &str,
-    note: &str,
-) -> anyhow::Result<()> {
+pub async fn set_recon(pool: &PgPool, id: Uuid, status: &str, note: &str) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE portfolio_assets SET recon_status = $2, recon_note = $3, recon_checked_at = now() \
          WHERE id = $1",
@@ -369,12 +378,19 @@ pub async fn set_recon(
 // ── Operations ────────────────────────────────────────────────────────────────
 
 pub async fn list_operations(pool: &PgPool, asset_id: Uuid) -> anyhow::Result<Vec<Operation>> {
+    list_operations_on(&mut *pool.acquire().await?, asset_id).await
+}
+
+pub(crate) async fn list_operations_on(
+    conn: &mut sqlx::PgConnection,
+    asset_id: Uuid,
+) -> anyhow::Result<Vec<Operation>> {
     Ok(sqlx::query_as::<_, Operation>(
         "SELECT id, asset_id, side, op_date, quantity, price, fee, note, created_at \
          FROM portfolio_operations WHERE asset_id = $1 ORDER BY op_date DESC, created_at DESC",
     )
     .bind(asset_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .context("listing operations")?)
 }
@@ -398,9 +414,31 @@ pub async fn list_portfolio_operations(
     Ok(rows
         .into_iter()
         .map(
-            |(id, asset_id, side, op_date, quantity, price, fee, note, created_at, symbol, currency)| {
+            |(
+                id,
+                asset_id,
+                side,
+                op_date,
+                quantity,
+                price,
+                fee,
+                note,
+                created_at,
+                symbol,
+                currency,
+            )| {
                 (
-                    Operation { id, asset_id, side, op_date, quantity, price, fee, note, created_at },
+                    Operation {
+                        id,
+                        asset_id,
+                        side,
+                        op_date,
+                        quantity,
+                        price,
+                        fee,
+                        note,
+                        created_at,
+                    },
                     symbol,
                     currency,
                 )
@@ -520,6 +558,14 @@ pub(crate) async fn position_usd(
     ops: &[Operation],
     currency: &str,
 ) -> anyhow::Result<(f64, f64, f64)> {
+    position_usd_on(&mut *pool.acquire().await?, ops, currency).await
+}
+
+async fn position_usd_on(
+    conn: &mut sqlx::PgConnection,
+    ops: &[Operation],
+    currency: &str,
+) -> anyhow::Result<(f64, f64, f64)> {
     let chrono = sorted_operations(ops);
     let mut fx = journal_fx::FxCache::new();
     // Resolve every operation's (price, fee) first (async, per-date FX), then run
@@ -530,8 +576,12 @@ pub(crate) async fn position_usd(
             (op.price, op.fee)
         } else {
             (
-                fx.convert(pool, op.price, currency, "USD", op.op_date).await?.unwrap_or(op.price),
-                fx.convert(pool, op.fee, currency, "USD", op.op_date).await?.unwrap_or(op.fee),
+                fx.convert_on(conn, op.price, currency, "USD", op.op_date)
+                    .await?
+                    .unwrap_or(op.price),
+                fx.convert_on(conn, op.fee, currency, "USD", op.op_date)
+                    .await?
+                    .unwrap_or(op.fee),
             )
         };
         resolved.push((price, fee));
@@ -600,6 +650,26 @@ pub(crate) async fn asset_view(
     date: Date,
     quote_override: Option<(f64, OffsetDateTime)>,
 ) -> anyhow::Result<AssetView> {
+    asset_view_on(
+        &mut *pool.acquire().await?,
+        asset,
+        ops,
+        currency,
+        date,
+        quote_override,
+    )
+    .await
+}
+
+/// Reuses the Portfolio accounting engine inside a paper execution transaction.
+pub(crate) async fn asset_view_on(
+    conn: &mut sqlx::PgConnection,
+    asset: Asset,
+    ops: &[Operation],
+    currency: &str,
+    date: Date,
+    quote_override: Option<(f64, OffsetDateTime)>,
+) -> anyhow::Result<AssetView> {
     // Surface whichever price source won as the row's own (computed) price fields, so the
     // serialized view carries the fresh USD price and its observation time unchanged.
     let asset = match quote_override {
@@ -612,16 +682,29 @@ pub(crate) async fn asset_view(
         None => asset,
     };
 
-    let (qty, basis_usd, realized_usd) = position_usd(pool, ops, &asset.currency).await?;
-    let conv = |usd: f64| async move { journal_fx::convert(pool, usd, "USD", currency, date).await };
+    let (qty, basis_usd, realized_usd) = position_usd_on(conn, ops, &asset.currency).await?;
+    let mut fx = journal_fx::FxCache::new();
 
-    let cost_basis = conv(basis_usd).await?.unwrap_or(basis_usd);
-    let realized = conv(realized_usd).await?.unwrap_or(realized_usd);
-    let avg_cost = if qty > 0.0 { Some(cost_basis / qty) } else { None };
+    let cost_basis = fx
+        .convert_on(conn, basis_usd, "USD", currency, date)
+        .await?
+        .unwrap_or(basis_usd);
+    let realized = fx
+        .convert_on(conn, realized_usd, "USD", currency, date)
+        .await?
+        .unwrap_or(realized_usd);
+    let avg_cost = if qty > 0.0 {
+        Some(cost_basis / qty)
+    } else {
+        None
+    };
 
     let (price, market_value, unrealized) = match asset.last_price_usd {
         Some(p) => {
-            let price = conv(p).await?.unwrap_or(p);
+            let price = fx
+                .convert_on(conn, p, "USD", currency, date)
+                .await?
+                .unwrap_or(p);
             let mv = price * qty;
             (Some(price), Some(mv), Some(mv - cost_basis))
         }
@@ -758,7 +841,9 @@ pub async fn mark_refreshed(pool: &PgPool, id: Uuid) -> anyhow::Result<()> {
 // ── CoinGecko coin list cache ──────────────────────────────────────────────────
 
 /// Cached coin list (raw [{id,symbol,name}]) and when it was fetched, or None if never.
-pub async fn coingecko_cache(pool: &PgPool) -> anyhow::Result<Option<(serde_json::Value, OffsetDateTime)>> {
+pub async fn coingecko_cache(
+    pool: &PgPool,
+) -> anyhow::Result<Option<(serde_json::Value, OffsetDateTime)>> {
     let row: Option<(serde_json::Value, OffsetDateTime)> =
         sqlx::query_as("SELECT coins, fetched_at FROM portfolio_coingecko_cache WHERE id")
             .fetch_optional(pool)
@@ -820,8 +905,22 @@ mod position_tests {
     fn same_day_buy_then_sell_uses_entry_order() {
         // A: BUY 100 @ 56.50 then SELL 50 @ 56.00, same day, BUY entered first.
         let ops = vec![
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:33:38 UTC), 100.0, 56.50, 0.0),
-            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 15:34:29 UTC), 50.0, 56.00, 0.0),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 15:33:38 UTC),
+                100.0,
+                56.50,
+                0.0,
+            ),
+            op(
+                "sell",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 15:34:29 UTC),
+                50.0,
+                56.00,
+                0.0,
+            ),
         ];
         let (qty, basis, realized) = accumulate(ops);
         near(qty, 50.0);
@@ -834,8 +933,22 @@ mod position_tests {
     fn cross_day_buy_then_sell() {
         // B: BUY on one day, SELL on a later day — same expected accounting.
         let ops = vec![
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 09:00:00 UTC), 100.0, 56.50, 0.0),
-            op("sell", date!(2026 - 09 - 02), datetime!(2026-09-02 09:00:00 UTC), 50.0, 56.00, 0.0),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 09:00:00 UTC),
+                100.0,
+                56.50,
+                0.0,
+            ),
+            op(
+                "sell",
+                date!(2026 - 09 - 02),
+                datetime!(2026-09-02 09:00:00 UTC),
+                50.0,
+                56.00,
+                0.0,
+            ),
         ];
         let (qty, basis, realized) = accumulate(ops);
         near(qty, 50.0);
@@ -847,8 +960,22 @@ mod position_tests {
     fn same_day_full_exit() {
         // C: BUY 100 then SELL 100 same day → flat, zero basis.
         let ops = vec![
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 10:00:00 UTC), 100.0, 56.50, 0.0),
-            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 100.0, 56.00, 0.0),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 10:00:00 UTC),
+                100.0,
+                56.50,
+                0.0,
+            ),
+            op(
+                "sell",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 11:00:00 UTC),
+                100.0,
+                56.00,
+                0.0,
+            ),
         ];
         let (qty, basis, realized) = accumulate(ops);
         near(qty, 0.0);
@@ -860,9 +987,30 @@ mod position_tests {
     fn same_day_mixed_sequence_follows_entry_order() {
         // D: BUY 100 / SELL 50 / BUY 20, same day, strictly by created_at.
         let ops = vec![
-            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 15:01:00 UTC), 50.0, 12.0, 0.0),
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:00:00 UTC), 100.0, 10.0, 0.0),
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 15:02:00 UTC), 20.0, 10.0, 0.0),
+            op(
+                "sell",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 15:01:00 UTC),
+                50.0,
+                12.0,
+                0.0,
+            ),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 15:00:00 UTC),
+                100.0,
+                10.0,
+                0.0,
+            ),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 15:02:00 UTC),
+                20.0,
+                10.0,
+                0.0,
+            ),
         ];
         // The Vec is deliberately NOT in chronological order — the sort must fix it.
         let (qty, basis, realized) = accumulate(ops);
@@ -877,8 +1025,22 @@ mod position_tests {
         // E: hold 20, sell 50 → realized only on the COVERED 20 shares; the
         // uncovered remainder is dropped (no short selling, no phantom profit).
         let ops = vec![
-            op("buy", date!(2026 - 09 - 01), datetime!(2026-09-01 10:00:00 UTC), 20.0, 10.0, 0.0),
-            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 50.0, 12.0, 0.0),
+            op(
+                "buy",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 10:00:00 UTC),
+                20.0,
+                10.0,
+                0.0,
+            ),
+            op(
+                "sell",
+                date!(2026 - 09 - 01),
+                datetime!(2026-09-01 11:00:00 UTC),
+                50.0,
+                12.0,
+                0.0,
+            ),
         ];
         let (qty, basis, realized) = accumulate(ops);
         near(qty, 0.0);
@@ -890,9 +1052,14 @@ mod position_tests {
     #[test]
     fn sell_with_nothing_held_has_no_effect() {
         // Defensive: SELL into a zero position must not fabricate proceeds.
-        let ops = vec![
-            op("sell", date!(2026 - 09 - 01), datetime!(2026-09-01 11:00:00 UTC), 50.0, 56.00, 0.0),
-        ];
+        let ops = vec![op(
+            "sell",
+            date!(2026 - 09 - 01),
+            datetime!(2026-09-01 11:00:00 UTC),
+            50.0,
+            56.00,
+            0.0,
+        )];
         let (qty, basis, realized) = accumulate(ops);
         near(qty, 0.0);
         near(basis, 0.0);
@@ -942,14 +1109,16 @@ mod quote_pick_tests {
     #[test]
     fn shared_quote_wins_when_newer() {
         let a = asset(Some((10.0, datetime!(2026-09-01 0:00 UTC))), None);
-        let (p, _) = pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-02 0:00 UTC)))).unwrap();
+        let (p, _) =
+            pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-02 0:00 UTC)))).unwrap();
         assert_eq!(p, 12.0);
     }
 
     #[test]
     fn stale_shared_quote_keeps_last_price() {
         let a = asset(Some((10.0, datetime!(2026-09-02 0:00 UTC))), None);
-        let (p, _) = pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-01 0:00 UTC)))).unwrap();
+        let (p, _) =
+            pick_price_usd(&a, Some(&quote(12.0, datetime!(2026-09-01 0:00 UTC)))).unwrap();
         assert_eq!(p, 10.0);
     }
 
@@ -966,7 +1135,10 @@ mod quote_pick_tests {
         // An asset priced through an exchange override has no default identity in the
         // shared cache — asset_views must never hand it a default-provider market row
         // (this guard is what keeps the override priced by its own source).
-        let a = asset(Some((10.0, datetime!(2026-09-02 0:00 UTC))), Some("binance"));
+        let a = asset(
+            Some((10.0, datetime!(2026-09-02 0:00 UTC))),
+            Some("binance"),
+        );
         assert_eq!(asset_default_key(&a), None);
         let (p, _) = pick_price_usd(&a, None).unwrap();
         assert_eq!(p, 10.0);

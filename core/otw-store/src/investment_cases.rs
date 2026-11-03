@@ -489,7 +489,9 @@ pub async fn instrument_position(
     let today = OffsetDateTime::now_utc().date();
 
     let assets: Vec<Asset> = sqlx::query_as(
-        "SELECT * FROM portfolio_assets WHERE provider = $1 AND provider_id = $2",
+        "SELECT * FROM portfolio_assets WHERE provider = $1 AND provider_id = $2 \
+         AND NOT EXISTS (SELECT 1 FROM paper_trading_strategies pts \
+                         WHERE pts.portfolio_id = portfolio_assets.portfolio_id)",
     )
     .bind(&case.provider)
     .bind(&case.provider_id)

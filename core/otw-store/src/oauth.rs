@@ -27,6 +27,7 @@ pub const ACCESS_PREFIX: &str = "otw_oat_";
 pub const REFRESH_PREFIX: &str = "otw_ort_";
 
 pub const SCOPE_MCP_READ: &str = "mcp:read";
+pub const SCOPE_MCP_PAPER_TRADE: &str = "mcp:paper-trade";
 pub const SCOPE_OFFLINE_ACCESS: &str = "offline_access";
 
 pub const ACCESS_TTL_SECS: i64 = 15 * 60;
@@ -34,9 +35,9 @@ pub const REFRESH_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 pub const CODE_TTL_SECS: i64 = 5 * 60;
 pub const PENDING_TTL_SECS: i64 = 10 * 60;
 
-/// Scopes this authorization server accepts. Anything else is rejected; the MCP layer only
-/// grants read access to OAuth tokens.
-pub const SUPPORTED_SCOPES: &[&str] = &[SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS];
+/// Scopes this authorization server accepts. Paper Trading is a separate opt-in scope;
+/// it never grants write access to the normal Portfolio module.
+pub const SUPPORTED_SCOPES: &[&str] = &[SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS];
 
 pub fn random_hex(bytes: usize) -> anyhow::Result<String> {
     let mut buf = vec![0u8; bytes];

@@ -114,6 +114,11 @@ const MODULES: &[ModuleTables] = &[
             "portfolio_coingecko_cache",
         ],
     },
+    // AI Paper Trading. Each strategy owns a dedicated portfolio, so there is no safe
+    // independent table list to truncate: wiping paper_trading_* without the portfolio (or
+    // the reverse) would break the strategy↔ledger link. Detach hides the module and leaves
+    // the data intact; `wipe=true` is therefore a no-op for this id.
+    ModuleTables { id: "paper-trading", name: "AI Paper Trading", tables: &[] },
     ModuleTables {
         id: "watchlists",
         name: "Watchlists",

@@ -15,11 +15,12 @@
 //! * Discovery URLs are built only from `OTW_PUBLIC_BASE_URL`, never from Host or
 //!   X-Forwarded-* headers.
 //! * No code, verifier, token or cookie value is ever logged.
-//! * Only read scope (`mcp:read`) is minted; the MCP layer additionally exposes just the
-//!   read tools for OAuth principals.
+//! * `mcp:read` is read-only. The separate `mcp:paper-trade` opt-in grants write access
+//!   only to the isolated Paper Trading module; normal Portfolio remains read-only.
 //!
-//! OTW is single-user: authorization is limited to admin accounts and the data model does
-//! not provide per-portfolio ownership. See CUSTOM_CHANGES C-017.
+//! OTW's normal business data is single-user: authorization is limited to admin accounts and
+//! normal Portfolio rows do not carry ownership. Paper Trading strategies are user-bound and
+//! expose only their linked isolated paper portfolio through the dedicated module. See C-018.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ use sha2::{Digest, Sha256};
 use crate::{ApiError, AppState, SESSION_COOKIE};
 use otw_store::mcp::hash_token;
 use otw_store::oauth as store;
-use otw_store::oauth::{OAuthClient, SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS};
+use otw_store::oauth::{OAuthClient, SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS};
 
 const REGISTER_LIMIT: u32 = 20;
 const REGISTER_WINDOW: Duration = Duration::from_secs(60);
@@ -141,7 +142,7 @@ async fn protected_resource_metadata(State(state): State<AppState>) -> Response 
         json!({
             "resource": resource_url(&base),
             "authorization_servers": [base],
-            "scopes_supported": [SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS],
+            "scopes_supported": [SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS],
             "bearer_methods_supported": ["header"],
             "resource_name": "OpenTraderWorld MCP",
             "resource_documentation": base,
@@ -171,7 +172,7 @@ async fn authorization_server_metadata(State(state): State<AppState>) -> Respons
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": [SCOPE_MCP_READ, SCOPE_OFFLINE_ACCESS],
+            "scopes_supported": [SCOPE_MCP_READ, SCOPE_MCP_PAPER_TRADE, SCOPE_OFFLINE_ACCESS],
             // RFC 9207: the client must verify `iss` on the callback.
             "authorization_response_iss_parameter_supported": true,
             "service_documentation": base,
@@ -677,7 +678,17 @@ async fn register(State(state): State<AppState>, Json(input): Json<RegisterReque
             Ok(s) => s,
             Err(e) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_scope", &e),
         },
-        None => vec![SCOPE_MCP_READ.to_string(), SCOPE_OFFLINE_ACCESS.to_string()],
+        None => {
+            // Keep the registered ceiling in sync with what the MCP challenge advertises:
+            // a client that omits `scope` must still be able to request the optional paper
+            // scope at authorization (the resource owner still has to consent).
+            let mut scopes = vec![SCOPE_MCP_READ.to_string()];
+            if state.mcp_advertise_paper_trade {
+                scopes.push(SCOPE_MCP_PAPER_TRADE.to_string());
+            }
+            scopes.push(SCOPE_OFFLINE_ACCESS.to_string());
+            scopes
+        }
     };
 
     match store::count_clients(&state.pool).await {
@@ -999,22 +1010,27 @@ fn consent_html(
         .iter()
         .map(|s| format!("<span class=\"scope\">{}</span>", esc(s)))
         .collect();
+    let permissions = if scopes.iter().any(|s| s == SCOPE_MCP_PAPER_TRADE) {
+        "This grants read access to OTW data plus write access only to isolated Paper Trading accounts. It cannot change normal Portfolio holdings or send broker orders."
+    } else {
+        "This grants read-only access. It cannot write, delete, trade, or change your holdings."
+    };
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <title>Authorize {client}</title>{style}</head><body><main>\
          <h1>Authorize {client}</h1>\
-         <p><strong>{client}</strong> wants to read your OpenTraderWorld data.</p>\
+         <p><strong>{client}</strong> wants access to your OpenTraderWorld data.</p>\
          <div class=\"box\"><div class=\"k\">Signed in as</div><div class=\"v\">{user}</div></div>\
          <div class=\"box\"><div class=\"k\">MCP resource</div><div class=\"v\">{resource}</div></div>\
          <div class=\"box\"><div class=\"k\">Scopes</div><div class=\"scopes\">{scopes}</div></div>\
-         <p>This grants read-only access. It cannot write, delete, trade, or change your holdings.</p>\
+         <p>{permissions}</p>\
          <form method=\"post\" action=\"/api/oauth/authorize/decision\" autocomplete=\"off\">\
          <input type=\"hidden\" name=\"request_id\" value=\"{pending}\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
          <div class=\"actions\">\
-         <button class=\"allow\" type=\"submit\" name=\"decision\" value=\"allow\">Allow read access</button>\
+         <button class=\"allow\" type=\"submit\" name=\"decision\" value=\"allow\">Allow requested access</button>\
          <button class=\"deny\" type=\"submit\" name=\"decision\" value=\"deny\">Deny</button>\
          </div></form>\
          <p>Only the OpenTraderWorld owner account can authorize this connector. \
@@ -1024,6 +1040,7 @@ fn consent_html(
         user = esc(username),
         resource = esc(resource),
         scopes = scope_tags,
+        permissions = permissions,
         pending = pending_id,
         csrf = esc(csrf),
         style = PAGE_STYLE,
@@ -1079,6 +1096,30 @@ mod tests {
         );
         assert!(parse_scope_list("mcp:write").is_err());
         assert!(parse_scope_list("admin").is_err());
+    }
+
+    #[test]
+    fn paper_trade_scope_is_supported_but_read_scope_remains_required() {
+        let scopes = parse_scope_list("mcp:read mcp:paper-trade").unwrap();
+        assert!(scopes.iter().any(|s| s == SCOPE_MCP_READ));
+        assert!(scopes.iter().any(|s| s == SCOPE_MCP_PAPER_TRADE));
+
+        let client = OAuthClient {
+            id: uuid::Uuid::nil(),
+            client_id: "test-client".into(),
+            client_name: "Test".into(),
+            redirect_uris: vec![],
+            grant_types: vec![],
+            response_types: vec![],
+            token_endpoint_auth_method: "none".into(),
+            scopes: vec![SCOPE_MCP_READ.into(), SCOPE_MCP_PAPER_TRADE.into()],
+            source: "test".into(),
+            created_at: time::OffsetDateTime::now_utc(),
+            last_used_at: None,
+            disabled_at: None,
+        };
+        assert!(parse_scopes(Some("mcp:paper-trade"), &client).is_err());
+        assert!(parse_scopes(Some("mcp:read mcp:paper-trade"), &client).is_ok());
     }
 
     #[test]
