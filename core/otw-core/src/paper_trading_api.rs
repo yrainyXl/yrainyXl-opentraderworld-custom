@@ -708,7 +708,10 @@ async fn ensure_document(
 pub(crate) struct UpdatePaperDocumentBody {
     expected_updated_at: String,
     /// Full TipTap/ProseMirror JSON document; preserves rich formatting.
-    content: Value,
+    content: Option<Value>,
+    /// Simpler alternative for scheduled agents; converts headings, bullets and
+    /// paragraphs to Editor blocks. Exactly one of content/markdown is required.
+    markdown: Option<String>,
 }
 
 async fn update_document(
@@ -720,14 +723,19 @@ async fn update_document(
     owned_strategy(&state.pool, id, user.id).await?;
     let at = OffsetDateTime::parse(&body.expected_updated_at, &Rfc3339)
         .map_err(|_| ApiError::bad_request("expected_updated_at must be RFC3339"))?;
-    if body.content.to_string().len() > 100_000 {
+    let content = match (body.content, body.markdown) {
+        (Some(content), None) => content,
+        (None, Some(markdown)) => markdown_to_tiptap(&markdown),
+        _ => return Err(ApiError::bad_request("provide exactly one of content or markdown")),
+    };
+    if content.to_string().len() > 100_000 {
         return Err(ApiError::bad_request("document exceeds 100 KB"));
     }
-    if !body.content.is_object() || body.content.get("type").and_then(Value::as_str) != Some("doc")
-        || !body.content.get("content").is_some_and(Value::is_array) {
+    if !content.is_object() || content.get("type").and_then(Value::as_str) != Some("doc")
+        || !content.get("content").is_some_and(Value::is_array) {
         return Err(ApiError::bad_request("content must be a TipTap document JSON object"));
     }
-    let outcome = paper_docs::update(&state.pool, id, asset_id, at, &body.content).await?;
+    let outcome = paper_docs::update(&state.pool, id, asset_id, at, &content).await?;
     match outcome {
         paper_docs::UpdateOutcome::Missing => Err(ApiError::not_found("strategy document not created")),
         paper_docs::UpdateOutcome::Stale => Err(ApiError::conflict(
@@ -738,6 +746,46 @@ async fn update_document(
             Ok(Json(json!({"updated": true, "document": document})))
         }
     }
+}
+
+/// Minimal, deterministic Markdown → TipTap conversion for agent-authored
+/// global notes. Existing manually formatted notes can instead be supplied as
+/// full JSON to preserve Editor-specific blocks.
+fn markdown_to_tiptap(markdown: &str) -> Value {
+    fn inline(text: &str) -> Value {
+        json!({"type":"paragraph","content":[{"type":"text","text":text}]})
+    }
+    let mut blocks = Vec::new();
+    let mut bullets: Vec<Value> = Vec::new();
+    let flush = |blocks: &mut Vec<Value>, bullets: &mut Vec<Value>| {
+        if !bullets.is_empty() {
+            blocks.push(json!({"type":"bulletList","content":std::mem::take(bullets)}));
+        }
+    };
+    for line in markdown.lines() {
+        let text = line.trim();
+        if text.is_empty() {
+            flush(&mut blocks, &mut bullets);
+            continue;
+        }
+        if let Some(item) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            bullets.push(json!({"type":"listItem","content":[inline(item)]}));
+            continue;
+        }
+        flush(&mut blocks, &mut bullets);
+        let depth = text.chars().take_while(|c| *c == '#').count();
+        if (1..=3).contains(&depth) && text.as_bytes().get(depth) == Some(&b' ') {
+            let title = text[depth + 1..].trim();
+            if !title.is_empty() {
+                blocks.push(json!({"type":"heading","attrs":{"level":depth},
+                    "content":[{"type":"text","text":title}]}));
+            }
+        } else {
+            blocks.push(inline(text));
+        }
+    }
+    flush(&mut blocks, &mut bullets);
+    json!({"type":"doc","content":blocks})
 }
 
 #[cfg(test)]
