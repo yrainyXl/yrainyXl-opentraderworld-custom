@@ -477,6 +477,30 @@
 - **部署（2026-11-01）**：core 与 frontend 镜像重建，`up -d --no-deps core`；frontend 一次性容器重新发布 `web-assets`；`app_settings.installed_modules` 已追加 `paper-trading`。公网 `/paper-trading` 返回 200，新 hashed chunks 可访问。
 - **回滚**：停用/卸载模块即可隐藏入口；删除前端路由与 registry 条目、还原 `data_admin.rs` 后重建，无 schema 变化、无数据迁移。
 
+### C-020 Paper Trading 日级活动 + Editor 全局策略页（2026-11-03）
+
+- **修改原因**：C-018/C-019 只有完整 runs / orders 列表，长篇分析每天重复展示；同时缺少「单只标的当前全局策略」的持久位置。新增按交易日分页的活动视图，并把每只标的的当前 thesis 放到 Editor，历史判断仍留在不可变 run 中。
+- **数据边界**：
+  - 日视图只是展示层：`paper_trading_runs` 与 Portfolio operations 仍是唯一事实来源；`estimated_pnl` 基于下单前的 run 快照，不能当作官方收盘盈亏。
+  - `paper_strategy_documents` 只保存 strategy+asset 到 Editor 页的关联，不复制持仓、成交或 Investment Case；Editor 独占富文本内容。
+  - AI 更新全局 thesis 时用 `expected_updated_at` 乐观锁；重复内容 no-op，过期版本 409。历史判断仍在 run 审计中。
+- **修改文件**：
+  - `core/otw-store/migrations/9000000111_paper_strategy_documents.sql`
+  - `core/otw-store/src/paper_documents.rs`、`lib.rs`、`paper_trading.rs`、`tests/paper_trading.rs`
+  - `core/otw-core/src/paper_trading_api.rs`、`mcp/catalog.rs`
+  - 前端 `src/lib/modules/paper-trading/{api.js,PaperTradingPage.svelte}`、`src/routes/editor/+page.svelte`、`src/lib/i18n/{en,zh}.json`
+  - `.github/workflows/paper-trading.yml`、`docs/design/PAPER_TRADING_AGENT.md`、`CUSTOM_ARCHITECTURE.md`
+- **API**：
+  - `GET /api/paper-trading/strategies/{id}/days`：按 Asia/Shanghai 日历日分页，返回 run/成交计数与估算权益变化。
+  - `GET /api/paper-trading/strategies/{id}/days/{YYYY-MM-DD}`：展开某日的完整 AI 输入与真实模拟成交。
+  - `GET/POST /api/paper-trading/strategies/{id}/documents[/{asset_id}]`：列出/幂等创建 Editor 全局策略页。
+  - `GET/PUT .../documents/{asset_id}`：读取或更新当前 thesis；PUT 支持 TipTap JSON 或 markdown，带乐观锁。
+  - 全部沿用 `mcp:paper-trade` scope，不授予通用 Editor 写权限。
+- **Migration**：`9000000111_paper_strategy_documents.sql` 新建关联表（strategy+asset 主键，document FK `ON DELETE SET NULL`，strategy/asset FK CASCADE）；不修改既有表或账本。
+- **验证**：CI（`.github/workflows/paper-trading.yml`）通过；本地 `scripts/cargo-check.sh` ✓、`npm run build` ✓；部署后 migration 已应用，`paper_strategy_documents` 存在，`GET .../days` 与 `.../documents` 返回 401（路由已接、需登录）。
+- **部署（2026-11-03）**：core 与 frontend 镜像重建并部署；前端一次性容器重新发布 `web-assets`；迁移 `9000000111` 自动应用。现有 2 个策略 / 14 条 run / 1 笔订单未改动。
+- **回滚**：删除 migration row `9000000111` 并 `DROP TABLE paper_strategy_documents`（只解除 Editor 链接，不删除文档或账本），再还原对应代码重建；无 Portfolio/成交数据迁移。
+
 ## 3. Migration 编号登记
 
 **编号策略（长期约定，2026-09-01 起）**：
@@ -500,6 +524,7 @@
 | 9000000108 | `9000000108_agent_api_tokens.sql` | 外部 AI Agent API Token（绑定用户 + scopes + 过期/撤销；见 C-016） | ✅ 已应用 |
 | 9000000109 | `9000000109_mcp_oauth.sql` | MCP OAuth 2.1：clients / pending / codes / access / refresh tokens（见 C-017） | ✅ 已应用 |
 | 9000000110 | `9000000110_paper_trading.sql` | AI Paper Trading：strategy / run / order audit tables（见 C-018） | ✅ 已应用（2026-11-01） |
+| 9000000111 | `9000000111_paper_strategy_documents.sql` | Paper strategy ↔ Editor 文档关联表（见 C-020） | ✅ 已应用（2026-11-03） |
 
 **一次性 namespace cutover（2026-09-01）**：custom migration 最初以 `0100`/`0101` 命名并已应用到数据库（`_sqlx_migrations` version 100/101，checksum `26c7a93a…`/`d6df54fb…`）。为规避与未来 upstream 编号（官方已到 0097，即将触及 0100）冲突，执行了 history cutover：
 
