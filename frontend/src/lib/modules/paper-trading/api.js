@@ -38,7 +38,23 @@ export const paperTradingApi = {
   runs: (id, limit = 20) =>
     req(`/paper-trading/strategies/${id}/runs?limit=${limit}`).then((r) => r.runs ?? []),
   orders: (id, limit = 20) =>
-    req(`/paper-trading/strategies/${id}/orders?limit=${limit}`).then((r) => r.orders ?? [])
+    req(`/paper-trading/strategies/${id}/orders?limit=${limit}`).then((r) => r.orders ?? []),
+  days: (id, limit = 10, offset = 0) =>
+    req(`/paper-trading/strategies/${id}/days?limit=${limit}&offset=${offset}`),
+  day: (id, date, limit = 100, offset = 0) =>
+    req(`/paper-trading/strategies/${id}/days/${encodeURIComponent(date)}?limit=${limit}&offset=${offset}`),
+  documents: (id) => req(`/paper-trading/strategies/${id}/documents`).then((r) => r.documents ?? []),
+  ensureDocument: (id, assetId) =>
+    req(`/paper-trading/strategies/${id}/documents/${assetId}`, { method: 'POST' }).then(
+      (r) => r.document
+    ),
+  document: (id, assetId) =>
+    req(`/paper-trading/strategies/${id}/documents/${assetId}`).then((r) => r.document),
+  updateDocument: (id, assetId, content, expectedUpdatedAt) =>
+    req(`/paper-trading/strategies/${id}/documents/${assetId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, expected_updated_at: expectedUpdatedAt })
+    })
 };
 
 /** Human status label key. */

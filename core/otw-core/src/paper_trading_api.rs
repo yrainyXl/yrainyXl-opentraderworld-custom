@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::{market, portfolios::prices, ApiError, AppState};
 use otw_store::User;
-use otw_store::{journal::CURRENCIES, paper_trading as store, portfolios};
+use otw_store::{
+    journal::CURRENCIES, paper_documents as paper_docs, paper_trading as store, portfolios,
+};
 
 const DECISIONS: [&str; 7] = [
     "observe", "hold", "buy", "add", "reduce", "exit", "no_trade",
@@ -48,6 +50,19 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/paper-trading/strategies/{id}/orders",
             get(list_orders).post(place_order),
+        )
+        .route("/api/paper-trading/strategies/{id}/days", get(list_days))
+        .route(
+            "/api/paper-trading/strategies/{id}/days/{date}",
+            get(day_detail),
+        )
+        .route(
+            "/api/paper-trading/strategies/{id}/documents",
+            get(list_documents),
+        )
+        .route(
+            "/api/paper-trading/strategies/{id}/documents/{asset_id}",
+            get(get_document).post(ensure_document).put(update_document),
         )
 }
 
@@ -403,6 +418,12 @@ async fn add_asset(
     let asset = portfolios::get_asset(&state.pool, asset.id)
         .await?
         .unwrap_or(asset);
+    // New paper assets get a scoped Editor thesis page automatically. This
+    // is idempotent and repairable via POST /documents/{asset_id} for older
+    // assets or if document creation failed after the asset committed.
+    if let Err(error) = paper_docs::ensure(&state.pool, strategy.id, asset.id).await {
+        tracing::warn!("paper strategy document setup failed: {error:#}");
+    }
     Ok(Json(json!({ "asset": asset })))
 }
 
@@ -615,6 +636,189 @@ async fn list_orders(
     owned_strategy(&state.pool, id, user.id).await?;
     let orders = store::list_orders(&state.pool, id, query.limit.unwrap_or(50)).await?;
     Ok(Json(json!({ "orders": orders })))
+}
+
+#[derive(Deserialize)]
+struct DayPageQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn list_days(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<DayPageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let strategy = owned_strategy(&state.pool, id, user.id).await?;
+    let limit = query.limit.unwrap_or(10).clamp(1, 31);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let (total, days) =
+        store::list_day_summaries(&state.pool, id, strategy.initial_cash, limit, offset).await?;
+    Ok(Json(json!({
+        "days": days, "total": total, "limit": limit, "offset": offset,
+        "timezone": "Asia/Shanghai",
+        "pnl_note": "Estimated difference between pre-order run equity snapshots; not official end-of-day P/L."
+    })))
+}
+
+async fn day_detail(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, raw_date)): Path<(Uuid, String)>,
+    Query(query): Query<DayPageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    let day = Date::parse(&raw_date, &Iso8601::DATE)
+        .map_err(|_| ApiError::bad_request("date must be YYYY-MM-DD"))?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let (runs, orders) = tokio::try_join!(
+        store::list_runs_for_day(&state.pool, id, day, limit, offset),
+        store::list_orders_for_day(&state.pool, id, day, limit, offset),
+    )?;
+    Ok(Json(
+        json!({"date": raw_date, "runs": runs, "orders": orders,
+        "limit": limit, "offset": offset, "timezone": "Asia/Shanghai"}),
+    ))
+}
+
+// Each stock in each paper strategy gets one current thesis document in the
+// existing Editor tree. Daily runs are immutable; only a meaningful new
+// conclusion warrants updating this shared page.
+async fn list_documents(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    Ok(Json(
+        json!({"documents": paper_docs::list(&state.pool, id).await?}),
+    ))
+}
+
+async fn get_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, asset_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    let document = paper_docs::get(&state.pool, id, asset_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("strategy document not created; POST to ensure it"))?;
+    Ok(Json(json!({"document": document})))
+}
+
+async fn ensure_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, asset_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    let document = paper_docs::ensure(&state.pool, id, asset_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("asset is not in this paper strategy"))?;
+    Ok(Json(json!({"document": document})))
+}
+
+/// PUT expects an explicit optimistic version. Identical content is a no-op;
+/// stale agents cannot silently overwrite a human Editor change.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdatePaperDocumentBody {
+    expected_updated_at: String,
+    /// Full TipTap/ProseMirror JSON document; preserves rich formatting.
+    content: Option<Value>,
+    /// Simpler alternative for scheduled agents; converts headings, bullets and
+    /// paragraphs to Editor blocks. Exactly one of content/markdown is required.
+    markdown: Option<String>,
+}
+
+async fn update_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((id, asset_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdatePaperDocumentBody>,
+) -> Result<Json<Value>, ApiError> {
+    owned_strategy(&state.pool, id, user.id).await?;
+    let at = OffsetDateTime::parse(&body.expected_updated_at, &Rfc3339)
+        .map_err(|_| ApiError::bad_request("expected_updated_at must be RFC3339"))?;
+    let content = match (body.content, body.markdown) {
+        (Some(content), None) => content,
+        (None, Some(markdown)) => markdown_to_tiptap(&markdown),
+        _ => {
+            return Err(ApiError::bad_request(
+                "provide exactly one of content or markdown",
+            ))
+        }
+    };
+    if content.to_string().len() > 100_000 {
+        return Err(ApiError::bad_request("document exceeds 100 KB"));
+    }
+    if !content.is_object()
+        || content.get("type").and_then(Value::as_str) != Some("doc")
+        || !content.get("content").is_some_and(Value::is_array)
+    {
+        return Err(ApiError::bad_request(
+            "content must be a TipTap document JSON object",
+        ));
+    }
+    let outcome = paper_docs::update(&state.pool, id, asset_id, at, &content).await?;
+    match outcome {
+        paper_docs::UpdateOutcome::Missing => {
+            Err(ApiError::not_found("strategy document not created"))
+        }
+        paper_docs::UpdateOutcome::Stale => Err(ApiError::conflict(
+            "strategy document changed; reread and re-evaluate before updating",
+        )),
+        paper_docs::UpdateOutcome::Unchanged => {
+            Ok(Json(json!({"updated": false, "reason": "unchanged"})))
+        }
+        paper_docs::UpdateOutcome::Updated => {
+            let document = paper_docs::get(&state.pool, id, asset_id).await?;
+            Ok(Json(json!({"updated": true, "document": document})))
+        }
+    }
+}
+
+/// Minimal, deterministic Markdown → TipTap conversion for agent-authored
+/// global notes. Existing manually formatted notes can instead be supplied as
+/// full JSON to preserve Editor-specific blocks.
+fn markdown_to_tiptap(markdown: &str) -> Value {
+    fn inline(text: &str) -> Value {
+        json!({"type":"paragraph","content":[{"type":"text","text":text}]})
+    }
+    let mut blocks = Vec::new();
+    let mut bullets: Vec<Value> = Vec::new();
+    let flush = |blocks: &mut Vec<Value>, bullets: &mut Vec<Value>| {
+        if !bullets.is_empty() {
+            blocks.push(json!({"type":"bulletList","content":std::mem::take(bullets)}));
+        }
+    };
+    for line in markdown.lines() {
+        let text = line.trim();
+        if text.is_empty() {
+            flush(&mut blocks, &mut bullets);
+            continue;
+        }
+        if let Some(item) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            bullets.push(json!({"type":"listItem","content":[inline(item)]}));
+            continue;
+        }
+        flush(&mut blocks, &mut bullets);
+        let depth = text.chars().take_while(|c| *c == '#').count();
+        if (1..=3).contains(&depth) && text.as_bytes().get(depth) == Some(&b' ') {
+            let title = text[depth + 1..].trim();
+            if !title.is_empty() {
+                blocks.push(json!({"type":"heading","attrs":{"level":depth},
+                    "content":[{"type":"text","text":title}]}));
+            }
+        } else {
+            blocks.push(inline(text));
+        }
+    }
+    flush(&mut blocks, &mut bullets);
+    json!({"type":"doc","content":blocks})
 }
 
 #[cfg(test)]

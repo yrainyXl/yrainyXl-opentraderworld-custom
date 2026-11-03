@@ -120,6 +120,17 @@ Agent-write endpoints:
 
 The strategy-creation endpoint is deliberately not in the MCP catalog: strategy/account setup remains a human/session action.
 
+## Day-level activity and current thesis (incremental UI/API)
+
+- `GET /api/paper-trading/strategies/{id}/days?limit=10&offset=0`: newest-first **calendar-day** pagination (Asia/Shanghai); run count, fill count and estimated equity change. A run snapshot is captured **before** the order belonging to that run, so `estimated_pnl` must not be called official closing P/L or accurate realized P/L. Null equity must display as unknown.
+- `GET /api/paper-trading/strategies/{id}/days/{YYYY-MM-DD}?limit=100&offset=0`: lazy-load the full AI cycle inputs and real paper fills for an expanded day. The default page shows only daily counts/estimated P/L, not repeated verbose reasoning.
+- `GET /api/paper-trading/strategies/{id}/documents`: list all strategy assets with linked Editor pages (or `document_id:null`).
+- `POST /api/paper-trading/strategies/{id}/documents/{asset_id}`: idempotently ensure an Editor page exists, grouped under **AI 模拟交易策略 / strategy / asset**; useful for pre-existing paper assets and before the first AI run.
+- `GET /api/paper-trading/strategies/{id}/documents/{asset_id}`: read the current thesis as rich document JSON and `updated_at`.
+- `PUT /api/paper-trading/strategies/{id}/documents/{asset_id}`: send `expected_updated_at` from GET plus exactly one of `markdown` (simple headings/bullets/paragraphs) or `content` (TipTap JSON). An exact repeat is a no-op, while a stale update returns 409. A write is justified only by a meaningful new fact, changed trigger/invalidating condition, actual buy/sell rationale or new outcome/postmortem; not by another routine HOLD_CASH run.
+
+These endpoints are scoped to the existing `mcp:paper-trade` permission and user-owned strategy; they do not grant generic Editor writes. The Editor remains the sole source of note content, Portfolio remains the source of fills, and the immutable runs remain the complete audit. The scheduled ChatGPT prompts are deliberately **not** updated in this code phase.
+
 ## MCP / OAuth
 
 OAuth continues to require `mcp:read`.
