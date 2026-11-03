@@ -18,8 +18,17 @@
   let error = $state('');
   let selectedId = $state(null);
   let detail = $state(null);
-  let runs = $state([]);
-  let orders = $state([]);
+  // Compact daily timeline, server-paginated. Individual AI cycles load only on expansion.
+  const PAGE_SIZE = 10;
+  let days = $state([]);
+  let totalDays = $state(0);
+  let dayPage = $state(0);
+  let daysLoading = $state(false);
+  let selectedDay = $state(null);
+  let dayDetail = $state(null);
+  let dayLoading = $state(false);
+  let documents = $state([]);
+  let openingAssetId = $state(null);
   let detailLoading = $state(false);
   let showForm = $state(false);
   let saving = $state(false);
@@ -30,6 +39,7 @@
   const selected = $derived(detail?.strategy ?? strategies.find((s) => s.id === selectedId) ?? null);
   const account = $derived(detail?.account ?? null);
   const activeActions = $derived(selected?.status !== 'ended');
+  const pageCount = $derived(Math.ceil(totalDays / PAGE_SIZE));
 
   onMount(async () => {
     try {
@@ -47,8 +57,11 @@
     if (!strategies.length) {
       selectedId = null;
       detail = null;
-      runs = [];
-      orders = [];
+      days = [];
+      totalDays = 0;
+      documents = [];
+      selectedDay = null;
+      dayDetail = null;
       return;
     }
     const keep = strategies.some((s) => s.id === selectedId);
@@ -59,22 +72,79 @@
     selectedId = id;
     detailLoading = true;
     error = '';
+    selectedDay = null;
+    dayDetail = null;
+    dayPage = 0;
     try {
-      const [d, r, o] = await Promise.all([
+      const [d, docs, activity] = await Promise.all([
         paperTradingApi.detail(id),
-        paperTradingApi.runs(id),
-        paperTradingApi.orders(id)
+        paperTradingApi.documents(id),
+        paperTradingApi.days(id, PAGE_SIZE, 0)
       ]);
+      if (id !== selectedId) return;
       detail = d;
-      runs = r;
-      orders = o;
+      documents = docs;
+      days = activity.days ?? [];
+      totalDays = activity.total ?? 0;
     } catch (e) {
+      if (id !== selectedId) return;
       error = e.message;
       detail = null;
-      runs = [];
-      orders = [];
+      days = [];
+      totalDays = 0;
+      documents = [];
     } finally {
-      detailLoading = false;
+      if (id === selectedId) detailLoading = false;
+    }
+  }
+
+  async function goToPage(page) {
+    if (page < 0 || page >= pageCount || daysLoading || !selectedId) return;
+    daysLoading = true;
+    selectedDay = null;
+    dayDetail = null;
+    try {
+      const result = await paperTradingApi.days(selectedId, PAGE_SIZE, page * PAGE_SIZE);
+      days = result.days ?? [];
+      totalDays = result.total ?? 0;
+      dayPage = page;
+    } catch (e) {
+      error = e.message;
+    } finally {
+      daysLoading = false;
+    }
+  }
+
+  async function toggleDay(date) {
+    if (selectedDay === date) {
+      selectedDay = null;
+      dayDetail = null;
+      return;
+    }
+    const strategyId = selectedId;
+    selectedDay = date;
+    dayDetail = null;
+    dayLoading = true;
+    try {
+      const result = await paperTradingApi.day(strategyId, date);
+      if (strategyId === selectedId && selectedDay === date) dayDetail = result;
+    } catch (e) {
+      error = e.message;
+    } finally {
+      dayLoading = false;
+    }
+  }
+
+  async function openDocument(assetId) {
+    if (!selectedId || openingAssetId) return;
+    openingAssetId = assetId;
+    try {
+      const doc = await paperTradingApi.ensureDocument(selectedId, assetId);
+      // The Editor's query parameter selects this exact page, not the first document.
+      window.location.assign(`/editor?doc=${encodeURIComponent(doc.id)}`);
+    } catch (e) {
+      error = e.message;
+      openingAssetId = null;
     }
   }
 
@@ -260,6 +330,14 @@
                         <td>
                           <span class="mono">{h.symbol}</span>
                           {#if h.name}<span class="muted"> {h.name}</span>{/if}
+                          <button
+                            class="doc-link"
+                            disabled={openingAssetId !== null}
+                            title={$t('paper.open_thesis')}
+                            onclick={() => openDocument(h.id)}
+                          >
+                            {openingAssetId === h.id ? '…' : $t('paper.open_thesis')}
+                          </button>
                         </td>
                         <td class="num">{qty(h.quantity)}</td>
                         <td class="num">{money(h.avg_cost, account.currency)}</td>
@@ -277,60 +355,99 @@
           </section>
 
           <section class="block">
-            <h3>{$t('paper.runs')}</h3>
-            {#if !runs.length}
+            <header class="day-title">
+              <div>
+                <h3>{$t('paper.daily_activity')}</h3>
+                <p class="muted">{$t('paper.daily_note')}</p>
+              </div>
+              <span class="muted">{totalDays} {$t('paper.days_total')}</span>
+            </header>
+            {#if !days.length}
               <p class="muted">{$t('paper.no_runs')}</p>
             {:else}
-              <ul class="feed">
-                {#each runs as r (r.id)}
-                  <li>
-                    <div class="feed-head">
-                      <span class="decision">{r.decision}</span>
-                      <span class="muted">{$t('paper.confidence')} {r.confidence}/5</span>
-                      <span class="muted when">{when(r.created_at)}</span>
-                    </div>
-                    {#if r.inference}<p class="inference">{r.inference}</p>{/if}
-                  </li>
+              <div class="day-list" class:busy={daysLoading}>
+                {#each days as day (day.date)}
+                  <div class="day-card">
+                    <button
+                      class="day-button"
+                      aria-expanded={selectedDay === day.date}
+                      onclick={() => toggleDay(day.date)}
+                    >
+                      <span class="day-date">{day.date}</span>
+                      <span class="muted">{day.order_count} {$t('paper.trades')} · {day.run_count} {$t('paper.analyses')}</span>
+                      <span class:pos={day.estimated_pnl > 0} class:neg={day.estimated_pnl < 0} class="day-pnl">
+                        {day.estimated_pnl == null ? '—' : money(day.estimated_pnl, account?.currency)}
+                      </span>
+                      <span class="muted">{selectedDay === day.date ? '−' : '+'}</span>
+                    </button>
+                    {#if selectedDay === day.date}
+                      <div class="day-content">
+                        {#if dayLoading}
+                          <Skeleton rows={3} height="2rem" />
+                        {:else if dayDetail}
+                          <h4>{$t('paper.trades')}</h4>
+                          {#if !dayDetail.orders?.length}
+                            <p class="muted">{$t('paper.no_orders')}</p>
+                          {:else}
+                            <div class="table-wrap">
+                              <table>
+                                <thead><tr>
+                                  <th>{$t('paper.run_time')}</th>
+                                  <th>{$t('paper.side')}</th>
+                                  <th>{$t('paper.asset')}</th>
+                                  <th class="num">{$t('paper.qty')}</th>
+                                  <th class="num">{$t('paper.fill')}</th>
+                                  <th class="num">{$t('paper.fee')}</th>
+                                </tr></thead>
+                                <tbody>
+                                  {#each dayDetail.orders as o (o.id)}
+                                    <tr>
+                                      <td>{when(o.created_at)}</td>
+                                      <td><span class="side {o.side}">{o.side}</span></td>
+                                      <td class="mono">{o.symbol}</td>
+                                      <td class="num">{qty(o.requested_quantity)}</td>
+                                      <td class="num">{money(o.fill_price, o.fee_currency)}</td>
+                                      <td class="num">{money(o.fee, o.fee_currency)}</td>
+                                    </tr>
+                                  {/each}
+                                </tbody>
+                              </table>
+                            </div>
+                          {/if}
+                          <h4>{$t('paper.analyses')}</h4>
+                          {#each dayDetail.runs ?? [] as r (r.id)}
+                            <details class="run-detail">
+                              <summary>
+                                <strong class="decision">{r.decision}</strong>
+                                <span class="muted">{$t('paper.confidence')} {r.confidence}/5</span>
+                                <span class="muted">{when(r.scheduled_at)}</span>
+                              </summary>
+                              {#if r.inference}<p class="inference">{r.inference}</p>{/if}
+                              <p class="muted">{$t('paper.market_facts')}</p>
+                              <pre>{JSON.stringify(r.market_facts ?? {}, null, 2)}</pre>
+                              <p class="muted">{$t('paper.market_expectations')}</p>
+                              <pre>{JSON.stringify(r.market_expectations ?? {}, null, 2)}</pre>
+                              <p class="muted">{$t('paper.evidence')}</p>
+                              <pre>{JSON.stringify(r.evidence ?? [], null, 2)}</pre>
+                              <p class="muted">{$t('paper.risk_assessment')}</p>
+                              <pre>{JSON.stringify(r.risk_assessment ?? {}, null, 2)}</pre>
+                            </details>
+                          {/each}
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
                 {/each}
-              </ul>
-            {/if}
-          </section>
-
-          <section class="block">
-            <h3>{$t('paper.orders')}</h3>
-            {#if !orders.length}
-              <p class="muted">{$t('paper.no_orders')}</p>
-            {:else}
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{$t('paper.run_time')}</th>
-                      <th>{$t('paper.side')}</th>
-                      <th>{$t('paper.asset')}</th>
-                      <th class="num">{$t('paper.qty')}</th>
-                      <th class="num">{$t('paper.fill')}</th>
-                      <th class="num">{$t('paper.fee')}</th>
-                      <th class="num">{$t('paper.quote')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each orders as o (o.id)}
-                      <tr>
-                        <td>{when(o.created_at)}</td>
-                        <td><span class="side {o.side}">{o.side}</span></td>
-                        <td class="mono">{o.symbol}</td>
-                        <td class="num">{qty(o.requested_quantity)}</td>
-                        <td class="num">{money(o.fill_price, o.fee_currency)}</td>
-                        <td class="num">{money(o.fee, o.fee_currency)}</td>
-                        <td class="num muted">
-                          {money(o.quote_price_usd, 'USD')} · {when(o.quote_at)}
-                        </td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
               </div>
+              <nav class="pagination" aria-label={$t('paper.daily_activity')}>
+                <button disabled={dayPage <= 0 || daysLoading} onclick={() => goToPage(dayPage - 1)}>
+                  {$t('paper.previous')}
+                </button>
+                <span>{dayPage + 1} / {pageCount || 1}</span>
+                <button disabled={dayPage + 1 >= pageCount || daysLoading} onclick={() => goToPage(dayPage + 1)}>
+                  {$t('paper.next')}
+                </button>
+              </nav>
             {/if}
           </section>
         {:else}
@@ -577,6 +694,52 @@
   .side.sell {
     color: var(--red, #c9776b);
   }
+  .doc-link {
+    margin-left: var(--space-2);
+    padding: 2px 5px;
+    color: var(--accent);
+    border: 0;
+    background: none;
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .doc-link:disabled { opacity: .5; cursor: wait; }
+  .day-title, .day-button, .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .day-title { margin-bottom: var(--space-3); }
+  .day-title h3 { margin: 0; }
+  .day-title p { margin: var(--space-1) 0 0; }
+  .day-list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .day-list.busy { opacity: .55; }
+  .day-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .day-button {
+    border: 0;
+    background: var(--surface);
+    color: var(--text);
+    padding: var(--space-3);
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    flex-wrap: wrap;
+  }
+  .day-date { font-weight: var(--fw-medium); }
+  .day-pnl { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .day-content { border-top: 1px solid var(--border); padding: var(--space-3); }
+  .day-content h4 { margin: var(--space-3) 0 var(--space-2); font-size: var(--text-sm); }
+  .run-detail { border-top: 1px solid var(--border); padding: var(--space-2) 0; }
+  .run-detail summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); cursor: pointer; }
+  .run-detail pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-xs); }
+  .pagination { justify-content: flex-end; margin-top: var(--space-3); }
+  .pagination button {
+    padding: var(--space-2) var(--space-3); background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); cursor: pointer;
+  }
+  .pagination button:disabled { opacity: .4; cursor: not-allowed; }
   @media (max-width: 820px) {
     .grid {
       grid-template-columns: 1fr;
