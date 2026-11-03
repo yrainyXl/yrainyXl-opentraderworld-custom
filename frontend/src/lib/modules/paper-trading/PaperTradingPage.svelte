@@ -374,7 +374,7 @@
                       onclick={() => toggleDay(day.date)}
                     >
                       <span class="day-date">{day.date}</span>
-                      <span class="muted">{day.order_count} {$t('paper.trades')} · {day.run_count} {$t('paper.analyses')}</span>
+                      <span class="muted">{day.order_count} {$t('paper.trades')} · {day.run_count} {$t('paper.analysis_times')}</span>
                       <span class:pos={day.estimated_pnl > 0} class:neg={day.estimated_pnl < 0} class="day-pnl">
                         {day.estimated_pnl == null ? '—' : money(day.estimated_pnl, account?.currency)}
                       </span>
