@@ -5094,5 +5094,6 @@
   "paper.market_facts": "Verified facts",
   "paper.market_expectations": "Market expectations",
   "paper.evidence": "Evidence",
-  "paper.risk_assessment": "Risk assessment"
+  "paper.risk_assessment": "Risk assessment",
+  "paper.analysis_times": "runs"
 }
