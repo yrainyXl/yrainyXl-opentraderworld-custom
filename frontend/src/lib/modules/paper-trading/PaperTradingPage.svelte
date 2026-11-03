@@ -375,6 +375,16 @@
                     >
                       <span class="day-date">{day.date}</span>
                       <span class="muted">{day.order_count} {$t('paper.trades')} · {day.run_count} {$t('paper.analysis_times')}</span>
+                      <span class="day-trades">
+                        {#if day.trades?.length}
+                          {#each day.trades.slice(0, 2) as trade}
+                            <span>{trade.side === 'buy' ? $t('paper.buy') : $t('paper.sell')} {trade.symbol} ×{qty(trade.quantity)}</span>
+                          {/each}
+                          {#if day.trades.length > 2}<span>+{day.trades.length - 2}</span>{/if}
+                        {:else}
+                          <span class="muted">{$t('paper.no_trades_day')}</span>
+                        {/if}
+                      </span>
                       <span class:pos={day.estimated_pnl > 0} class:neg={day.estimated_pnl < 0} class="day-pnl">
                         {day.estimated_pnl == null ? '—' : money(day.estimated_pnl, account?.currency)}
                       </span>
@@ -727,6 +737,8 @@
     flex-wrap: wrap;
   }
   .day-date { font-weight: var(--fw-medium); }
+  .day-trades { display: flex; flex-wrap: wrap; gap: var(--space-2); font-size: var(--text-xs); }
+
   .day-pnl { margin-left: auto; font-variant-numeric: tabular-nums; }
   .day-content { border-top: 1px solid var(--border); padding: var(--space-3); }
   .day-content h4 { margin: var(--space-3) 0 var(--space-2); font-size: var(--text-sm); }
