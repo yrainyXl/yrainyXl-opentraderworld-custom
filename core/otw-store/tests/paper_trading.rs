@@ -3,7 +3,7 @@
 
 use otw_store::{
     connect_and_migrate, investment_cases, journal_fx, market_quotes, paper_trading as paper,
-    portfolios,
+    paper_documents, portfolios,
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -710,4 +710,66 @@ async fn oauth_paper_permission_remains_opt_in_and_survives_refresh_without_wide
     assert!(row.has_scope(oauth::SCOPE_MCP_PAPER_TRADE));
     assert!(!row.has_scope("portfolios:rw"));
     assert_eq!(row.scopes.len(), 2);
+}
+
+#[tokio::test]
+async fn strategy_editor_thesis_is_idempotent_versioned_and_recoverable() {
+    let p = pool().await;
+    let s = strategy(&p, 10_000.0, 1.0, 0.0, 0.0).await;
+    let a = asset(&p, &s, "yahoo", "USD").await;
+    let created = paper_documents::ensure(&p, s.id, a.id).await.unwrap().unwrap();
+    let repeat = paper_documents::ensure(&p, s.id, a.id).await.unwrap().unwrap();
+    assert_eq!(created.id, repeat.id);
+    assert_eq!(paper_documents::list(&p, s.id).await.unwrap().len(), 1);
+
+    let revised = json!({"type":"doc","content":[{"type":"paragraph",
+        "content":[{"type":"text","text":"Buy only after verified earnings."}]}]});
+    assert_eq!(
+        paper_documents::update(&p, s.id, a.id, created.updated_at, &revised)
+            .await.unwrap(),
+        paper_documents::UpdateOutcome::Updated
+    );
+    assert_eq!(
+        paper_documents::update(&p, s.id, a.id, created.updated_at, &revised)
+            .await.unwrap(),
+        paper_documents::UpdateOutcome::Unchanged
+    );
+    let newer = json!({"type":"doc","content":[{"type":"paragraph",
+        "content":[{"type":"text","text":"Hold cash."}]}]});
+    assert_eq!(
+        paper_documents::update(&p, s.id, a.id, created.updated_at, &newer)
+            .await.unwrap(),
+        paper_documents::UpdateOutcome::Stale
+    );
+    let current = paper_documents::get(&p, s.id, a.id).await.unwrap().unwrap();
+    assert_eq!(current.content, Some(revised));
+
+    otw_store::documents::delete(&p, created.id).await.unwrap();
+    assert!(paper_documents::get(&p, s.id, a.id).await.unwrap().is_none());
+    let restored = paper_documents::ensure(&p, s.id, a.id).await.unwrap().unwrap();
+    assert_ne!(created.id, restored.id);
+}
+
+#[tokio::test]
+async fn daily_activity_pages_use_historical_run_equity_not_current_cash() {
+    let p = pool().await;
+    let s = strategy(&p, 1000.0, 1.0, 0.0, 0.0).await;
+    let old = OffsetDateTime::now_utc() - Duration::days(2);
+    paper::create_run(&p, s.id, "day-old", Some(old), &s.model,
+        &json!({}), &json!({}), "wait", "no_trade", 3, &json!([]),
+        &json!({}), &json!({"equity":1000.0})).await.unwrap();
+    paper::create_run(&p, s.id, "day-new", Some(OffsetDateTime::now_utc()), &s.model,
+        &json!({}), &json!({}), "still wait", "no_trade", 3, &json!([]),
+        &json!({}), &json!({"equity":1012.0})).await.unwrap();
+
+    let (total, first) = paper::list_day_summaries(&p, s.id, s.initial_cash, 1, 0)
+        .await.unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["estimated_pnl"], json!(12.0));
+    assert_eq!(first[0]["run_count"], json!(1));
+    let (_, older) = paper::list_day_summaries(&p, s.id, s.initial_cash, 1, 1)
+        .await.unwrap();
+    assert_eq!(older.len(), 1);
+    assert_eq!(older[0]["estimated_pnl"], json!(0.0));
 }
