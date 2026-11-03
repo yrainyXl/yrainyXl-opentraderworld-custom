@@ -1111,6 +1111,14 @@ pub async fn list_day_summaries(
               AND (r.scheduled_at AT TIME ZONE 'Asia/Shanghai')::date = days.day),
             (SELECT COUNT(*) FROM paper_trading_orders o WHERE o.strategy_id = $1
               AND (o.created_at AT TIME ZONE 'Asia/Shanghai')::date = days.day),
+            (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                 'side', o.side, 'symbol', a.symbol, 'quantity', op.quantity
+               ) ORDER BY o.created_at), '[]'::jsonb)
+               FROM paper_trading_orders o
+               JOIN portfolio_operations op ON op.id = o.operation_id
+               JOIN portfolio_assets a ON a.id = op.asset_id
+               WHERE o.strategy_id = $1
+                 AND (o.created_at AT TIME ZONE 'Asia/Shanghai')::date = days.day),
             (SELECT (r.account_snapshot->>'equity')::double precision
                FROM paper_trading_runs r WHERE r.strategy_id = $1
                  AND (r.scheduled_at AT TIME ZONE 'Asia/Shanghai')::date = days.day
@@ -1123,16 +1131,17 @@ pub async fn list_day_summaries(
                ORDER BY r.scheduled_at DESC, r.created_at DESC LIMIT 1)
           {dates} ORDER BY days.day DESC LIMIT $2 OFFSET $3"
     );
-    let rows: Vec<(Date, i64, i64, Option<f64>, Option<f64>)> =
+    let rows: Vec<(Date, i64, i64, Value, Option<f64>, Option<f64>)> =
         sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(strategy_id).bind(limit.clamp(1, 31)).bind(offset.max(0))
             .fetch_all(pool).await.context("listing paper daily summaries")?;
-    let days = rows.into_iter().map(|(date, run_count, order_count, equity, previous_equity)| {
+    let days = rows.into_iter().map(|(date, run_count, order_count, trades, equity, previous_equity)| {
         // Null means there is no complete valuation snapshot; never fabricate a return.
         serde_json::json!({
             "date": date.to_string(),
             "run_count": run_count,
             "order_count": order_count,
+            "trades": trades,
             "equity": equity,
             "previous_equity": previous_equity,
             "estimated_pnl": equity.map(|value| value - previous_equity.unwrap_or(initial_cash)),
