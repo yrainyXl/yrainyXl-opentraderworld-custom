@@ -5095,5 +5095,8 @@
   "paper.market_expectations": "市场预期",
   "paper.evidence": "证据",
   "paper.risk_assessment": "风险评估",
-  "paper.analysis_times": "次分析"
+  "paper.analysis_times": "次分析",
+  "paper.buy": "买入",
+  "paper.sell": "卖出",
+  "paper.no_trades_day": "未成交"
 }
