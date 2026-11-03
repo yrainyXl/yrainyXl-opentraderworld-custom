@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::{market, portfolios::prices, ApiError, AppState};
 use otw_store::User;
-use otw_store::{journal::CURRENCIES, paper_trading as store, paper_documents as paper_docs, portfolios};
+use otw_store::{
+    journal::CURRENCIES, paper_documents as paper_docs, paper_trading as store, portfolios,
+};
 
 const DECISIONS: [&str; 7] = [
     "observe", "hold", "buy", "add", "reduce", "exit", "no_trade",
@@ -50,10 +52,18 @@ pub fn routes() -> Router<AppState> {
             get(list_orders).post(place_order),
         )
         .route("/api/paper-trading/strategies/{id}/days", get(list_days))
-        .route("/api/paper-trading/strategies/{id}/days/{date}", get(day_detail))
-        .route("/api/paper-trading/strategies/{id}/documents", get(list_documents))
-        .route("/api/paper-trading/strategies/{id}/documents/{asset_id}",
-            get(get_document).post(ensure_document).put(update_document))
+        .route(
+            "/api/paper-trading/strategies/{id}/days/{date}",
+            get(day_detail),
+        )
+        .route(
+            "/api/paper-trading/strategies/{id}/documents",
+            get(list_documents),
+        )
+        .route(
+            "/api/paper-trading/strategies/{id}/documents/{asset_id}",
+            get(get_document).post(ensure_document).put(update_document),
+        )
 }
 
 async fn owned_strategy(
@@ -628,7 +638,6 @@ async fn list_orders(
     Ok(Json(json!({ "orders": orders })))
 }
 
-
 #[derive(Deserialize)]
 struct DayPageQuery {
     limit: Option<i64>,
@@ -644,9 +653,8 @@ async fn list_days(
     let strategy = owned_strategy(&state.pool, id, user.id).await?;
     let limit = query.limit.unwrap_or(10).clamp(1, 31);
     let offset = query.offset.unwrap_or(0).max(0);
-    let (total, days) = store::list_day_summaries(
-        &state.pool, id, strategy.initial_cash, limit, offset,
-    ).await?;
+    let (total, days) =
+        store::list_day_summaries(&state.pool, id, strategy.initial_cash, limit, offset).await?;
     Ok(Json(json!({
         "days": days, "total": total, "limit": limit, "offset": offset,
         "timezone": "Asia/Shanghai",
@@ -669,8 +677,10 @@ async fn day_detail(
         store::list_runs_for_day(&state.pool, id, day, limit, offset),
         store::list_orders_for_day(&state.pool, id, day, limit, offset),
     )?;
-    Ok(Json(json!({"date": raw_date, "runs": runs, "orders": orders,
-        "limit": limit, "offset": offset, "timezone": "Asia/Shanghai"})))
+    Ok(Json(
+        json!({"date": raw_date, "runs": runs, "orders": orders,
+        "limit": limit, "offset": offset, "timezone": "Asia/Shanghai"}),
+    ))
 }
 
 // Each stock in each paper strategy gets one current thesis document in the
@@ -682,7 +692,9 @@ async fn list_documents(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     owned_strategy(&state.pool, id, user.id).await?;
-    Ok(Json(json!({"documents": paper_docs::list(&state.pool, id).await?})))
+    Ok(Json(
+        json!({"documents": paper_docs::list(&state.pool, id).await?}),
+    ))
 }
 
 async fn get_document(
@@ -691,7 +703,8 @@ async fn get_document(
     Path((id, asset_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
     owned_strategy(&state.pool, id, user.id).await?;
-    let document = paper_docs::get(&state.pool, id, asset_id).await?
+    let document = paper_docs::get(&state.pool, id, asset_id)
+        .await?
         .ok_or_else(|| ApiError::not_found("strategy document not created; POST to ensure it"))?;
     Ok(Json(json!({"document": document})))
 }
@@ -702,7 +715,8 @@ async fn ensure_document(
     Path((id, asset_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
     owned_strategy(&state.pool, id, user.id).await?;
-    let document = paper_docs::ensure(&state.pool, id, asset_id).await?
+    let document = paper_docs::ensure(&state.pool, id, asset_id)
+        .await?
         .ok_or_else(|| ApiError::not_found("asset is not in this paper strategy"))?;
     Ok(Json(json!({"document": document})))
 }
@@ -732,21 +746,34 @@ async fn update_document(
     let content = match (body.content, body.markdown) {
         (Some(content), None) => content,
         (None, Some(markdown)) => markdown_to_tiptap(&markdown),
-        _ => return Err(ApiError::bad_request("provide exactly one of content or markdown")),
+        _ => {
+            return Err(ApiError::bad_request(
+                "provide exactly one of content or markdown",
+            ))
+        }
     };
     if content.to_string().len() > 100_000 {
         return Err(ApiError::bad_request("document exceeds 100 KB"));
     }
-    if !content.is_object() || content.get("type").and_then(Value::as_str) != Some("doc")
-        || !content.get("content").is_some_and(Value::is_array) {
-        return Err(ApiError::bad_request("content must be a TipTap document JSON object"));
+    if !content.is_object()
+        || content.get("type").and_then(Value::as_str) != Some("doc")
+        || !content.get("content").is_some_and(Value::is_array)
+    {
+        return Err(ApiError::bad_request(
+            "content must be a TipTap document JSON object",
+        ));
     }
     let outcome = paper_docs::update(&state.pool, id, asset_id, at, &content).await?;
     match outcome {
-        paper_docs::UpdateOutcome::Missing => Err(ApiError::not_found("strategy document not created")),
+        paper_docs::UpdateOutcome::Missing => {
+            Err(ApiError::not_found("strategy document not created"))
+        }
         paper_docs::UpdateOutcome::Stale => Err(ApiError::conflict(
-            "strategy document changed; reread and re-evaluate before updating")),
-        paper_docs::UpdateOutcome::Unchanged => Ok(Json(json!({"updated": false, "reason": "unchanged"}))),
+            "strategy document changed; reread and re-evaluate before updating",
+        )),
+        paper_docs::UpdateOutcome::Unchanged => {
+            Ok(Json(json!({"updated": false, "reason": "unchanged"})))
+        }
         paper_docs::UpdateOutcome::Updated => {
             let document = paper_docs::get(&state.pool, id, asset_id).await?;
             Ok(Json(json!({"updated": true, "document": document})))
