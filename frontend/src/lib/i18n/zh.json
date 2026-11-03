@@ -5081,5 +5081,18 @@
   "investmentCases.list.holding": "持仓 {qty} 股",
   "investmentCases.list.unheld": "未持仓",
   "investmentCases.list.open": "查看研究",
-  "investmentCases.list.noRecords": "暂无判断记录"
+  "investmentCases.list.noRecords": "暂无判断记录",
+  "paper.open_thesis": "查看全局策略",
+  "paper.create_thesis": "建立全局策略",
+  "paper.daily_activity": "每日交易与收益",
+  "paper.daily_note": "收益为 AI 分析时记录的账户快照差额估算，不等于正式收盘结算；交易数据来自模拟账本。",
+  "paper.days_total": "个交易记录日",
+  "paper.trades": "成交",
+  "paper.analyses": "次分析",
+  "paper.previous": "上一页",
+  "paper.next": "下一页",
+  "paper.market_facts": "已确认事实",
+  "paper.market_expectations": "市场预期",
+  "paper.evidence": "证据",
+  "paper.risk_assessment": "风险评估"
 }
