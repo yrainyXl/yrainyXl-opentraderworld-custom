@@ -5095,5 +5095,8 @@
   "paper.market_expectations": "Market expectations",
   "paper.evidence": "Evidence",
   "paper.risk_assessment": "Risk assessment",
-  "paper.analysis_times": "runs"
+  "paper.analysis_times": "runs",
+  "paper.buy": "Buy",
+  "paper.sell": "Sell",
+  "paper.no_trades_day": "No fills"
 }
