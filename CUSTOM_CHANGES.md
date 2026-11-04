@@ -501,6 +501,7 @@
 - **部署（2026-11-03）**：core 与 frontend 镜像重建并部署；前端一次性容器重新发布 `web-assets`；迁移 `9000000111` 自动应用。现有 2 个策略 / 14 条 run / 1 笔订单未改动。
 - **UI 修复（2026-11-03）**：日视图不再直接输出 `JSON.stringify`；新增 `PaperJson.svelte` 把 run 的 facts / expectations / evidence / risk 渲染为键值列表，原始 JSON 收进「原始数据（调试）」折叠项。Editor 全局策略链接改用 SPA `goto`，并在 `finally` 复位 `openingAssetId`，避免从 Editor 返回后按钮卡在 `…` 和 wait 光标。
 - **技术字段分组（2026-11-04）**：`market_facts` 等自由 JSON 里的 `*_id`、`document_*`、`checked_at_*`、账户快照副本（cash/equity/fees/initial_cash/cost_basis/return_pct/max_drawdown）、计数与 automation/schedule 字段属于 AI 写入的 bookkeeping，不是后端 schema。默认视图只显示市场事实；这些 key 收进「技术字段（N）」折叠项，原始 JSON 仍可展开，审计数据不丢弃。
+- **滚动修复（2026-11-04）**：模块容器是 `overflow: hidden`，页面自身补 `height: 100%; overflow-y: auto` 与 `space-6` padding，内容限制在 1180px 的 `.inner`；长日视图不再被裁掉。
 - **回滚**：删除 migration row `9000000111` 并 `DROP TABLE paper_strategy_documents`（只解除 Editor 链接，不删除文档或账本），再还原对应代码重建；无 Portfolio/成交数据迁移。
 
 ## 3. Migration 编号登记

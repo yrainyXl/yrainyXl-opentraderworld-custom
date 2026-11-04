@@ -191,15 +191,16 @@
 </script>
 
 <div class="paper">
-  <PageHeader title={$t('paper.title')} subtitle={$t('paper.subtitle')}>
-    {#snippet actions()}
-      <Button variant="primary" icon="plus" onclick={() => (showForm = true)}>
-        {$t('paper.new')}
-      </Button>
-    {/snippet}
-  </PageHeader>
+  <div class="inner">
+    <PageHeader title={$t('paper.title')} subtitle={$t('paper.subtitle')}>
+      {#snippet actions()}
+        <Button variant="primary" icon="plus" onclick={() => (showForm = true)}>
+          {$t('paper.new')}
+        </Button>
+      {/snippet}
+    </PageHeader>
 
-  <ErrorText {error} />
+    <ErrorText {error} />
 
   {#if loading}
     <div class="loading">
@@ -471,6 +472,7 @@
       </section>
     </div>
   {/if}
+  </div>
 
   {#if showForm}
     <StrategyForm bind:open={showForm} {saving} onsubmit={create} />
@@ -489,6 +491,12 @@
 
 <style>
   .paper {
+    height: 100%;
+    overflow-y: auto;
+    padding: var(--space-6);
+    box-sizing: border-box;
+  }
+  .inner {
     max-width: 1180px;
     margin: 0 auto;
   }
