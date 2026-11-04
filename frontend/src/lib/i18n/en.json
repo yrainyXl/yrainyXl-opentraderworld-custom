@@ -5028,6 +5028,7 @@
   "paper.confidence": "Confidence",
   "paper.run_time": "Time",
   "paper.raw_json": "Raw data (debug)",
+  "paper.technical_fields": "Technical fields",
   "investmentCases.list.lede": "Start with names you hold, then follow research on names you don't.",
   "investmentCases.list.empty": "No investment cases yet.",
   "investmentCases.list.emptyHint": "Open a position in Portfolio and press “Research” there to create your first investment case.",
